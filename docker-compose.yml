@@ -1,0 +1,145 @@
+# =============================================================================
+# kkFileView 5.0.2 —— 面向「业务系统用 iframe 嵌入预览页」的部署编排
+#
+#   默认：        docker compose up -d
+#                 → kkFileView 监听 http://localhost:8012
+#
+#   带同源反代：  docker compose --profile proxy up -d
+#                 → 额外启动 nginx，预览服务挂到 http://localhost:8080/kkfileview/
+#                   演示页 http://localhost:8080/
+#
+# 所有可调参数见 .env
+# =============================================================================
+
+name: kkfileview
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # kkFileView 预览服务
+  # ---------------------------------------------------------------------------
+  kkfileview:
+    image: ${KK_IMAGE:-kkfileview:5.0.2}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # ⚠️ 本机必需：WSL2 生成的 /etc/resolv.conf 指向 10.255.255.254，
+      #    该 DNS 代理在 docker bridge 网段不可达，容器内解析必失败。
+      #    构建期走 host 网络即可正常下载 apt / maven 依赖。
+      network: host
+      args:
+        KK_VERSION: ${KK_VERSION:-5.0.2}
+        UBUNTU_IMAGE: ${KK_UBUNTU_IMAGE:-ubuntu:24.04}
+        APT_MIRROR: ${KK_APT_MIRROR:-mirrors.aliyun.com}
+        MAVEN_IMAGE: ${KK_MAVEN_IMAGE:-maven:3.9-eclipse-temurin-21}
+    container_name: kkfileview
+    restart: unless-stopped
+
+    ports:
+      - "${KK_HOST_PORT:-8012}:8012"
+
+    # ⚠️ 本机必需：容器继承的 nameserver 是 WSL2 的 10.255.255.254，
+    #    在 bridge 网段不可达。而 kkFileView 要主动去抓远程文件，
+    #    解析不了域名就直接预览失败，所以这里显式指定公共 DNS。
+    #    如果你的文件源都在内网、且有内网 DNS，把它加到列表最前面。
+    dns:
+      - ${KK_DNS_PRIMARY:-223.5.5.5}
+      - ${KK_DNS_SECONDARY:-119.29.29.29}
+
+    # ⚠️ LibreOffice 无头转换会用 /dev/shm 做临时共享内存。
+    #    Docker 默认只给 64MB，转换大文件时 soffice 会被 SIGABRT 杀掉
+    #    （日志表现：Office process died with exit code 134）。
+    shm_size: "${KK_SHM_SIZE:-2gb}"
+
+    environment:
+      TZ: "${TZ:-Asia/Shanghai}"
+      JAVA_OPTS: "${KK_JAVA_OPTS:--XX:MaxRAMPercentage=50.0 -XX:+ExitOnOutOfMemoryError}"
+
+      # ---- 服务基础 ----
+      KK_SERVER_PORT: "8012"
+      # 挂在子路径（如 /preview）时改这里，并同步配反代
+      KK_CONTEXT_PATH: "${KK_CONTEXT_PATH:-/}"
+
+      # ---- ★ iframe / 反代 关键项 ★ ----
+      # 生成预览页里资源链接用的对外基地址。
+      #   default = 按请求头动态拼接（直连、无反代时用它）
+      #   反代场景必须显式写全，例如 https://app.example.com/kkfileview
+      #   （nginx 也可以按请求注入 X-Base-Url 头来动态覆盖，见 nginx/kkfileview.conf）
+      KK_BASE_URL: "${KK_BASE_URL:-default}"
+
+      # ---- 文件来源白名单（4.4.0+ 防 SSRF，必配）----
+      # 不配 = 拒绝所有外部文件；多个用英文逗号分隔，支持 *.example.com 通配
+      KK_TRUST_HOST: "${KK_TRUST_HOST:-*}"
+      # 黑名单优先级高于白名单，建议封掉内网段
+      KK_NOT_TRUST_HOST: "${KK_NOT_TRUST_HOST:-}"
+
+      # ---- 预览行为 ----
+      # pdf（推荐，默认）或 image
+      KK_OFFICE_PREVIEW_TYPE: "${KK_OFFICE_PREVIEW_TYPE:-pdf}"
+      KK_OFFICE_QUALITY: "${KK_OFFICE_QUALITY:-80}"
+
+      # ★ LibreOffice 实例端口列表，决定同时起几个 soffice 进程。
+      #   官方默认 2001,2002 是「同时起 2 个」，但容器内并行冷启动会互相抢占，
+      #   表现为启动日志里 exit code 81 / 134 两个实例全挂，最终只有 2001 存活、
+      #   2002 那个彻底废掉（并发容量反而减半）。
+      #   单机部署建议只留 1 个；真要并发就逐个增加，并同步加大 shm_size 与内存。
+      #   注：源码是 @Value("${office.plugin.server.ports:2001,2002}")，
+      #   必须用「大写+下划线」的环境变量名才能被 Spring relaxed binding 命中。
+      OFFICE_PLUGIN_SERVER_PORTS: "${KK_OFFICE_PORTS:-2001}"
+
+      # jdk=单机内存缓存；redis/default 需另配
+      KK_CACHE_TYPE: "${KK_CACHE_TYPE:-jdk}"
+      KK_CACHE_CLEAN_CRON: "${KK_CACHE_CLEAN_CRON:-0 0 3 * * ?}"
+
+      # ---- 水印（业务系统嵌入时常开）----
+      WATERMARK_TXT: "${WATERMARK_TXT:-}"
+      WATERMARK_FONT: "${WATERMARK_FONT:-微软雅黑}"
+
+      # ---- 安全 ----
+      # 删除接口默认禁用；要开必须设独立强密码，且调用方改用 POST
+      KK_DELETE_PASSWORD: "${KK_DELETE_PASSWORD:-false}"
+
+    volumes:
+      # 转换产物 / 预览缓存（占磁盘的地方）
+      - ./data/file:/opt/kkFileView-5.0.2/file
+      # 运行日志
+      - ./data/logs:/opt/kkFileView-5.0.2/log
+      # RocksDB 缓存（仅 KK_CACHE_TYPE=default 时使用）
+      - ./data/cache:/opt/kkFileView-5.0.2/cache
+      # 需要改「没有对应环境变量」的配置项时再打开。
+      # 注意：挂载后该文件会完全取代镜像内配置，升级时要重新同步，见 README。
+      #- ./config/application.properties:/opt/kkFileView-5.0.2/config/application.properties:ro
+
+    deploy:
+      resources:
+        limits:
+          # 容器内存上限；JAVA_OPTS 的 MaxRAMPercentage 按此值计算。
+          # LibreOffice 转换进程额外占用内存，建议不低于 2g
+          memory: ${KK_MEMORY_LIMIT:-4g}
+
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+
+  # ---------------------------------------------------------------------------
+  # 可选：nginx 同源反代
+  #   用途：把业务系统和 kkFileView 放到同一 origin 下，
+  #         彻底绕开 iframe 的混合内容 / 跨域 / 第三方 Cookie 问题。
+  #   启动：docker compose --profile proxy up -d
+  # ---------------------------------------------------------------------------
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: kkfileview-nginx
+    profiles: ["proxy"]
+    restart: unless-stopped
+    depends_on:
+      kkfileview:
+        condition: service_healthy
+    ports:
+      # ⚠️ 默认 8090：本机 8080 已被 maple-cloud、8081 已被 maple-cad-viewer 占用
+      - "${NGINX_HOST_PORT:-8090}:80"
+    volumes:
+      - ./nginx/kkfileview.conf:/etc/nginx/conf.d/default.conf:ro
+      # 演示页，用于验证 iframe 嵌入
+      - ./demo:/usr/share/nginx/html/demo:ro

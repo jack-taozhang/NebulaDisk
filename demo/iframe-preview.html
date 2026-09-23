@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kkFileView iframe 嵌入验证</title>
+<style>
+  :root {
+    --bg: #f5f6f8;
+    --panel: #ffffff;
+    --border: #e3e6ea;
+    --text: #1f2328;
+    --muted: #6b7280;
+    --accent: #2f6fed;
+    --code-bg: #eef1f5;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px;
+    background: var(--bg); color: var(--text);
+    font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px; margin-bottom: 16px;
+  }
+  label { display: block; font-weight: 600; font-size: 13px; margin-bottom: 6px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  input[type=text] {
+    flex: 1 1 420px; min-width: 260px; padding: 9px 11px;
+    border: 1px solid var(--border); border-radius: 7px;
+    font: 13px/1.4 ui-monospace, Consolas, monospace; background: #fff; color: var(--text);
+  }
+  button {
+    padding: 9px 16px; border: 1px solid var(--accent); border-radius: 7px;
+    background: var(--accent); color: #fff; font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+  button.ghost { background: #fff; color: var(--accent); }
+  button:hover { filter: brightness(0.95); }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  .frame-wrap {
+    border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+    background: #fff; height: 620px; margin-top: 12px;
+  }
+  iframe { width: 100%; height: 100%; border: 0; display: block; }
+  pre {
+    background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: 8px;
+    overflow: auto; font: 12px/1.6 ui-monospace, Consolas, monospace;
+    max-height: 200px; margin: 10px 0 0; white-space: pre-wrap; word-break: break-all;
+  }
+  .badge {
+    display: inline-block; padding: 1px 8px; border-radius: 999px;
+    font-size: 12px; font-weight: 600; border: 1px solid currentColor;
+  }
+  .b-ok { color: #12805c; } .b-warn { color: #b45309; }
+  .b-err { color: #b91c1c; } .b-idle { color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin-top: 10px; font-size: 13px; }
+  td { padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  td:first-child { color: var(--muted); width: 150px; white-space: nowrap; }
+  code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+</style>
+</head>
+<body>
+
+<h1>kkFileView iframe 嵌入验证</h1>
+<div class="sub">
+  当前页面：<code id="originNow">-</code> —— iframe 加载的是 <code>/kkfileview/</code> 下的预览页，
+  与当前页同源。用来确认「反向代理 + 预览链路」是否真正打通。
+</div>
+
+<div class="panel">
+  <label for="fileUrl">要预览的文件地址（必须能被 kkFileView 容器访问到）</label>
+  <div class="row">
+    <input type="text" id="fileUrl" value="https://file.keking.cn/demo/中文.pptx">
+    <button id="btnPreview">在 iframe 中预览</button>
+    <button id="btnOpen" class="ghost">新窗口打开</button>
+  </div>
+  <div class="hint">
+    文件地址所在域名必须在 <code>KK_TRUST_HOST</code> 白名单内，否则会提示「不信任的文件源」。
+  </div>
+
+  <table>
+    <tr><td>Base64（url 参数）</td><td><code id="outB64">-</code></td></tr>
+    <tr><td>最终预览地址</td><td><code id="outUrl">-</code></td></tr>
+    <tr><td>嵌入策略检查</td><td><span id="outXfo" class="badge b-idle">未检测</span></td></tr>
+    <tr><td>iframe 加载</td><td><span id="outState" class="badge b-idle">未加载</span></td></tr>
+  </table>
+</div>
+
+<div class="panel" style="padding-bottom:10px">
+  <label>预览窗口</label>
+  <div class="frame-wrap">
+    <iframe id="viewer" allowfullscreen referrerpolicy="no-referrer-when-downgrade"></iframe>
+  </div>
+</div>
+
+<div class="panel">
+  <label>业务系统里的接入代码</label>
+<pre>// /onlinePreview 的 url 参数 = Base64(文件地址) 之后再 encodeURIComponent
+function b64utf8(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = '';
+  bytes.forEach(b =&gt; bin += String.fromCharCode(b));
+  return btoa(bin);
+}
+
+function previewUrl(fileUrl, base = '/kkfileview') {
+  return base + '/onlinePreview?url=' + encodeURIComponent(b64utf8(fileUrl));
+}
+
+// 同源场景直接嵌 iframe
+// &lt;iframe src="/kkfileview/onlinePreview?url=..."&gt;
+// 注意：这里不要加 sandbox 属性，否则可能屏蔽掉 PDF 打印 / 下载等能力</pre>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+// 标准 Base64（非 url-safe）+ 外层 encodeURIComponent，与官方文档写法一致。
+// 服务端 decodeBase64String 会把空格还原成 '+'，所以正号不会丢。
+function b64utf8(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = '';
+  bytes.forEach(b => { bin += String.fromCharCode(b); });
+  return btoa(bin);
+}
+
+function previewUrl(fileUrl) {
+  return '/kkfileview/onlinePreview?url=' + encodeURIComponent(b64utf8(fileUrl));
+}
+
+function badge(id, text, cls) {
+  const el = $(id);
+  el.textContent = text;
+  el.className = 'badge ' + cls;
+}
+
+$('originNow').textContent = location.origin;
+
+// 探测响应头时故意打一个轻量端点（actuator/health），
+// 避免对预览地址发请求导致文档被转换两次。
+async function checkEmbedPolicy() {
+  try {
+    const res = await fetch('/kkfileview/actuator/health', { redirect: 'follow' });
+    const xfo = res.headers.get('x-frame-options');
+    const csp = res.headers.get('content-security-policy');
+    // 注意：跨源 fetch 默认只能读到简单响应头，这两个头同源时可见
+    if (xfo) {
+      badge('outXfo', xfo + '（会阻止 iframe 嵌入）', 'b-err');
+    } else if (csp && /frame-ancestors/i.test(csp)) {
+      badge('outXfo', 'CSP 含 frame-ancestors', 'b-warn');
+    } else {
+      badge('outXfo', '无禁止嵌入的响应头，可正常 iframe', 'b-ok');
+    }
+  } catch (e) {
+    // 跨源直接访问时读不到自定义头，属于预期情况，不算失败
+    badge('outXfo', '无法探测（跨源或端点未开放）', 'b-warn');
+  }
+}
+
+let loadTimer = null;
+
+function run() {
+  const fileUrl = $('fileUrl').value.trim();
+  if (!fileUrl) return;
+
+  $('outB64').textContent = b64utf8(fileUrl);
+  $('outUrl').textContent = location.origin + previewUrl(fileUrl);
+
+  badge('outState', '加载中…', 'b-idle');
+  $('viewer').src = previewUrl(fileUrl);
+
+  // 预览页同源可读；若 8 秒后仍未触发 load，基本可判定为链路异常
+  clearTimeout(loadTimer);
+  loadTimer = setTimeout(() => {
+    if ($('outState').textContent === '加载中…') {
+      badge('outState', '超时未完成（查容器日志与 base.url）', 'b-err');
+    }
+  }, 8000);
+}
+
+$('viewer').addEventListener('load', () => {
+  clearTimeout(loadTimer);
+  // 同源时能读 iframe 内部内容；读不到说明被跨源策略拦了
+  try {
+    const doc = $('viewer').contentDocument;
+    const title = doc && doc.title ? doc.title : '';
+    badge('outState', '已加载' + (title ? '：' + title : ''), 'b-ok');
+  } catch (e) {
+    badge('outState', '已加载（内容跨源，无法读取）', 'b-warn');
+  }
+});
+
+$('viewer').addEventListener('error', () => {
+  clearTimeout(loadTimer);
+  badge('outState', '加载失败', 'b-err');
+});
+
+$('btnPreview').addEventListener('click', run);
+$('btnOpen').addEventListener('click', () => {
+  window.open(previewUrl($('fileUrl').value.trim()), '_blank');
+});
+$('fileUrl').addEventListener('keydown', e => { if (e.key === 'Enter') run(); });
+
+checkEmbedPolicy();
+run();
+</script>
+</body>
+</html>

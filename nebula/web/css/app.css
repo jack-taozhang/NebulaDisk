@@ -1,0 +1,1496 @@
+/* ==========================================================================
+   NebulaDisk —— 仿 Windows 11 视觉体系
+   --------------------------------------------------------------------------
+   设计要点（对着 Win11 真实观感调的，不是随便套个圆角）：
+     - 窗口：8px 圆角、1px 半透明描边、大范围柔和阴影（不是硬黑边）
+     - 材质：Mica（不透明底 + 极淡噪点感）用于主窗口；
+             Acrylic（背景模糊）用于开始菜单 / 右键菜单 / 弹窗
+     - 强调色：#0067c0（Win11 默认蓝），悬停用 8% 透明度叠加
+     - 控件：4~6px 圆角、悬停/按下有明显但克制的底色变化
+     - 字体：Segoe UI；中文回退到微软雅黑
+     - 动效：150~250ms，缓动 ease-out；窗口开合有轻微缩放
+   ========================================================================== */
+
+:root {
+  /* ---- 主题色板（浅色） ---- */
+  --accent:            #0067c0;
+  --accent-hover:      #1975c5;
+  --accent-press:      #005ba4;
+  --accent-soft:       rgba(0, 103, 192, 0.09);
+
+  --bg-desktop:        #1f4c73;   /* 桌面壁纸兜底色 */
+  --bg-mica:           #f3f3f3;   /* 窗口主体 */
+  --bg-layer:          #fbfbfb;   /* 内容区（比窗口更亮） */
+  --bg-card:           #ffffff;
+  /* 侧栏已移除；本变量现在只被右侧「文件信息面板」使用，语义等同「面板底色」 */
+  --bg-panel:          #f3f3f3;
+  --bg-input:          #ffffff;
+  --bg-hover:          rgba(0, 0, 0, 0.045);
+  --bg-press:          rgba(0, 0, 0, 0.09);
+  --bg-selected:       rgba(0, 103, 192, 0.11);
+  --bg-acrylic:        rgba(249, 249, 249, 0.82);
+  --bg-titlebar:       rgba(255, 255, 255, 0.55);
+
+  --text:              #1b1b1b;
+  --text-2:            #5c5c5c;
+  --text-3:            #8a8a8a;
+  --text-inverse:      #ffffff;
+
+  --border:            rgba(0, 0, 0, 0.08);
+  --border-strong:     rgba(0, 0, 0, 0.14);
+  --divider:           rgba(0, 0, 0, 0.06);
+
+  --danger:            #c42b1c;
+  --danger-soft:       rgba(196, 43, 28, 0.08);
+  --ok:                #0f7b0f;
+  --warn:              #9d5d00;
+
+  /* ---- 阴影：Win11 用大范围低透明度，不要硬边 ---- */
+  --shadow-window: 0 32px 64px rgba(0,0,0,.28), 0 2px 21px rgba(0,0,0,.20);
+  --shadow-menu:   0 8px 24px rgba(0,0,0,.18), 0 0 1px rgba(0,0,0,.14);
+  --shadow-card:   0 1px 3px rgba(0,0,0,.09), 0 0 1px rgba(0,0,0,.08);
+  --shadow-taskbar: 0 -1px 3px rgba(0,0,0,.10);
+
+  --radius-win:  8px;
+  --radius-ctl:  5px;
+  --radius-menu: 8px;
+
+  --titlebar-h: 32px;
+  --taskbar-h:  48px;
+  /* --sidebar-w 已随侧栏一起移除（侧栏不再存在，宽度变量无用） */
+  /* 工具栏行高：Windows 观感偏紧凑。
+     原 48px 太高、留白浪费，按用户要求降到约 29px（-40%）。 */
+  --toolbar-h:  29px;
+  --addrbar-h:  36px;
+  --statusbar-h: 26px;
+
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+  --t-fast: 120ms;
+  --t: 180ms;
+}
+
+/* ---- 深色主题：只覆盖色板，结构不变 ---- */
+:root[data-theme="dark"] {
+  --accent:            #4cc2ff;
+  --accent-hover:      #63c9ff;
+  --accent-press:      #3aa8e0;
+  --accent-soft:       rgba(76, 194, 255, 0.13);
+
+  --bg-desktop:        #0d2137;
+  --bg-mica:           #202020;
+  --bg-layer:          #272727;
+  --bg-card:           #2d2d2d;
+  /* 同浅色主题：仅右侧文件信息面板使用 */
+  --bg-panel:          #202020;
+  --bg-input:          #2d2d2d;
+  --bg-hover:          rgba(255, 255, 255, 0.055);
+  --bg-press:          rgba(255, 255, 255, 0.10);
+  --bg-selected:       rgba(76, 194, 255, 0.16);
+  --bg-acrylic:        rgba(44, 44, 44, 0.86);
+  --bg-titlebar:       rgba(255, 255, 255, 0.03);
+
+  --text:              #f2f2f2;
+  --text-2:            #c3c3c3;
+  --text-3:            #909090;
+  --text-inverse:      #101010;
+
+  --border:            rgba(255, 255, 255, 0.09);
+  --border-strong:     rgba(255, 255, 255, 0.16);
+  --divider:           rgba(255, 255, 255, 0.07);
+
+  --danger:            #ff99a4;
+  --danger-soft:       rgba(255, 153, 164, 0.12);
+  --ok:                #6ccb5f;
+  --warn:              #fce100;
+
+  --shadow-window: 0 32px 64px rgba(0,0,0,.55), 0 2px 21px rgba(0,0,0,.40);
+  --shadow-menu:   0 8px 24px rgba(0,0,0,.44), 0 0 1px rgba(0,0,0,.30);
+  --shadow-card:   0 1px 3px rgba(0,0,0,.30);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0; padding: 0; height: 100%; overflow: hidden;
+  font-family: "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI",
+               "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+  font-size: 14px;
+  color: var(--text);
+  /* 不给出底色：桌面背景由 JS 注入（渐变或用户选图） */
+  background: var(--bg-desktop);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+button { font-family: inherit; font-size: inherit; color: inherit; }
+
+/* 滚动条：Win11 的细长样式 */
+::-webkit-scrollbar { width: 12px; height: 12px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(128,128,128,.42);
+  border-radius: 6px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover { background: rgba(128,128,128,.72); background-clip: content-box; }
+::-webkit-scrollbar-corner { background: transparent; }
+
+
+/* ==========================================================================
+   桌面
+   ========================================================================== */
+#desktop {
+  position: fixed; inset: 0;
+  background-size: cover; background-position: center;
+  overflow: hidden;
+}
+
+/* 桌面图标网格 */
+#desktop-icons {
+  position: absolute;
+  top: 12px; left: 12px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 84px);
+  grid-auto-rows: 92px;
+  grid-auto-flow: column;
+  gap: 4px;
+  max-height: calc(100vh - var(--taskbar-h) - 24px);
+}
+
+.desk-icon {
+  width: 84px; height: 92px;
+  display: flex; flex-direction: column; align-items: center;
+  justify-content: flex-start; gap: 6px;
+  padding: 8px 4px 4px;
+  border-radius: var(--radius-ctl);
+  cursor: default;
+  text-align: center;
+  border: 1px solid transparent;
+  transition: background var(--t-fast) var(--ease);
+}
+.desk-icon:hover { background: rgba(255,255,255,.12); border-color: rgba(255,255,255,.14); }
+.desk-icon.selected { background: rgba(0,103,192,.34); border-color: rgba(120,190,255,.55); }
+.desk-icon .di-img { width: 44px; height: 44px; display: grid; place-items: center; }
+.desk-icon .di-img svg { width: 42px; height: 42px; }
+.desk-icon .di-label {
+  font-size: 12px; line-height: 1.25; color: #fff;
+  text-shadow: 0 1px 3px rgba(0,0,0,.85), 0 0 8px rgba(0,0,0,.5);
+  max-width: 80px;
+  overflow: hidden; text-overflow: ellipsis;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  word-break: break-all;
+}
+
+
+/* ==========================================================================
+   窗口
+   ========================================================================== */
+.window {
+  position: absolute;
+  display: flex; flex-direction: column;
+  background: var(--bg-mica);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-win);
+  box-shadow: var(--shadow-window);
+  /* ★ overflow 必须是 visible（2026-09-21）★
+     需求（原文）：「调整窗口 鼠标感应区域 以边框外边缘向左和向右偏移
+                   一定范围内都可激活。目前都是在窗口里面，这个要调整一下。」
+
+     热区要**跨出边框**（shell.js 的 OUT），如果窗口还写着 overflow:hidden，
+     外扩出去的那几像素会被**裁掉** —— 等于白改。
+     所以窗口本身不再裁剪。
+
+     ★ 那原来靠它兜的圆角怎么办？★
+       裁剪职责**下移**给真正的内容容器（见下面 .toolbar 与 .win-body
+       的 border-radius + overflow:hidden 组合），效果等价：
+         · 顶部内容（工具栏/标题栏）自己裁上圆角
+         · 主体内容自己裁下圆角
+       这样视觉不变，而热区能自由跨出窗口边界。
+     ★ 整体仍被 #desktop(position:fixed;inset:0;overflow:hidden) 兜住 ★
+       窗口拖到屏幕外时不会溢出到浏览器滚动区。 */
+  overflow: visible;
+  animation: win-in var(--t) var(--ease);
+  will-change: transform, opacity;
+}
+@keyframes win-in {
+  from { opacity: 0; transform: scale(.965) translateY(10px); }
+  to   { opacity: 1; transform: scale(1) translateY(0); }
+}
+.window.closing {
+  animation: win-out 140ms var(--ease) forwards;
+  pointer-events: none;
+}
+@keyframes win-out {
+  to { opacity: 0; transform: scale(.965) translateY(10px); }
+}
+.window.minimized { display: none; }
+.window.maximized { border-radius: 0; border: none; }
+/* ★ 最大化时隐藏所有缩放热区（2026-09-21）★
+   最大化窗口不可缩放（shell.js 的 pointerdown 里 `if (state.maximized) return`），
+   但热区 div 仍在 DOM 里；跨边框后它们会向窗外伸出 OUT 像素，
+   在最大化（铺满视口）时那几像素会顶到视口外沿。直接隐藏最干净。
+   注意：用 visibility 而非 display，避免影响 $(> .children) 之类的选择器计数。 */
+.window.maximized [data-resize] { display: none; }
+
+/* 最大化时若不是全屏铺满，用 transition 平滑过渡 */
+.window.animating { transition: none; }
+
+/* ---- 标题栏 ---- */
+.titlebar {
+  height: var(--titlebar-h);
+  flex: 0 0 var(--titlebar-h);
+  display: flex; align-items: center;
+  background: var(--bg-titlebar);
+  padding-left: 12px;
+  cursor: default;
+}
+.titlebar .tb-icon { width: 16px; height: 16px; margin-right: 10px; flex: 0 0 16px; }
+.titlebar .tb-icon svg { width: 16px; height: 16px; display: block; }
+.titlebar .tb-title {
+  flex: 1; font-size: 12px; color: var(--text-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.titlebar .tb-controls { display: flex; height: 100%; }
+
+.tb-btn {
+  width: 46px; height: 100%;
+  display: grid; place-items: center;
+  background: none; border: none; cursor: default;
+  transition: background var(--t-fast) var(--ease);
+}
+.tb-btn svg { width: 10px; height: 10px; }
+.tb-btn:hover { background: var(--bg-hover); }
+.tb-btn:active { background: var(--bg-press); }
+.tb-btn.close:hover { background: #c42b1c; }
+.tb-btn.close:hover svg { stroke: #fff; }
+.tb-btn.close:active { background: #b02418; }
+
+/* ---- 主体：只留内容区 ---- */
+/* 侧栏（.sidebar / .side-item / .si-* 一整套样式）已按需求整体移除：
+   资源管理器窗口现在由 .content 独占整行，文件区更宽。
+   目录入口与引擎健康状态移到「此电脑」窗口。
+   ⚠️ 旧的 .sidebar 规则已删除，不要再从其它地方引用这些类名。 */
+.win-body {
+  flex: 1; display: flex; min-height: 0;
+  /* ★ 裁剪职责从 .window 下移到这里（见 .window 的 overflow 说明）★
+     下半部分圆角由本容器兜住，防止内容溢出成直角。 */
+  border-radius: 0 0 var(--radius-win) var(--radius-win);
+  overflow: hidden;
+}
+
+.content { flex: 1; display: flex; flex-direction: column; min-width: 0; position: relative; }
+
+/* ---- 拖拽上传遮罩 ----
+   拖文件进资源管理器窗口时盖在 .content 上；不拦截鼠标事件
+   （pointer-events:none），否则 dragover/drop 会被遮罩自己吃掉。 */
+.drop-mask {
+  position: absolute; inset: 0; z-index: 40;
+  display: none; place-items: center;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border: 2px dashed var(--accent);
+  border-radius: 4px;
+}
+.drop-mask.show { display: grid; animation: dm-in .12s var(--ease); }
+.drop-mask .dm-inner {
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  padding: 22px 30px; border-radius: 10px;
+  background: var(--bg-acrylic);
+  box-shadow: var(--shadow-card);
+  color: var(--accent);
+  text-align: center;
+}
+.drop-mask .dm-inner svg { width: 34px; height: 34px; }
+.drop-mask .dm-title { font-size: 13.5px; font-weight: 600; }
+.drop-mask .dm-sub { font-size: 11.5px; color: var(--text-3); }
+@keyframes dm-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* ---- 工具栏 ---- */
+.toolbar {
+  height: var(--toolbar-h); flex: 0 0 var(--toolbar-h);
+  display: flex; align-items: center; gap: 2px;
+  padding: 0 0 0 6px;
+  border-bottom: 1px solid var(--divider);
+  /* 配色跟随主题：浅色主题偏亮的 --bg-titlebar，深色主题自动跟着变，
+     不要写死色值（写死会在另一套主题下变成「一条异色横杠」）。 */
+  background: var(--bg-titlebar);
+  /* ★ 上圆角 + 裁剪（2026-09-21）★
+     .window 改为 overflow:visible 后（为了让 resize 热区跨出边框），
+     上半部分的圆角改由工具栏自己兜住 —— 否则四角会是直角。 */
+  border-radius: var(--radius-win) var(--radius-win) 0 0;
+  overflow: hidden;
+}
+
+/* ---- chromeless 窗口（无标题栏，控制按钮并入内容工具栏）----
+   没有标题栏时内容区就是窗口最上沿。
+   ★ .window 已改为 overflow:visible（为了让 resize 热区跨出边框），
+     所以圆角不能再靠 .window 兜 —— 由 .win-body 自己继承**四角**圆角
+     （普通窗口只需下两角，见上面 .win-body 规则；这里覆盖成全四角）。 */
+.window.chromeless .win-body { border-radius: inherit; overflow: hidden; }
+
+/* ==========================================================================
+   统一窗口工具栏（WM.Toolbar 生成，所有窗口共用）
+   --------------------------------------------------------------------------
+   ★ 布局约定（用户明确要求，改动前先确认）★
+        [操作按钮 …]  ← 全部在最左边
+        ............tb-spacer 撑开............
+        [— □ ×]       ← 窗口三键永远在最右边
+
+   整条兼作拖拽手柄（[data-drag-handle]）。
+   ========================================================================== */
+.toolbar.win-toolbar { cursor: default; padding-right: 0; gap: 2px; }
+.wt-left, .wt-right { display: flex; align-items: center; gap: 2px; flex: 0 0 auto; }
+
+/* 窗口三键：贴在最右，铺满工具栏高度，视觉上连成一块（Windows 风格） */
+.win-controls { display: flex; height: 100%; align-items: stretch; flex: 0 0 auto; margin-left: 2px; }
+.win-controls .tb-btn { height: 100%; width: 34px; border-radius: 0; }
+.win-controls .tb-btn svg { width: 10px; height: 10px; }
+
+/* ★ 三键必须压在 resize 热区之上 ★
+   需求（原文）：「右上角调整大小和关闭按钮有一定位置的冲突，
+   导致关闭容易激发调整窗口大小功能。」
+
+   resize 热区是 shell.js 里动态生成的 div，z-index:900。
+   三键若停在默认层级（auto），右上角那一小块就会被 ne 角热区吃掉，
+   点关闭变成拉窗口。声明式地把整条三键抬到 950，
+   与 shell.js 里「热区让位」形成双保险：
+   即使将来热区尺寸被人改宽，按钮仍然点得到。 */
+.win-controls, .tb-controls {
+  position: relative;
+  z-index: 950;
+}
+
+/* ★ resize 热区：光标默认不显示，靠「悬停意图」延时后动态挂上 ★
+   需求（原文）：「调整窗口大小的这个 感应范围感觉太快了，
+   同时是不是可以增加一下 延时显示。」
+
+   历史上热区的 cursor 直接写成 `X-resize`，鼠标**擦过**边缘即刻变双箭头，
+   用户只是路过却以为已经在调整大小，非常吵。
+
+   现在统一为：CSS 兜底 `cursor: default`（防 JS 未执行时出现旧行为），
+   真正的 resize 光标由 shell.js 的 pointerenter 定时器在停留
+   RESIZE_HOVER_DELAY(=260ms) 后写进内联 style。
+   注意：只改 cursor 观感，热区几何（EDGE/CORNER）和命中判定完全不变，
+   所以「按下去就能拖」的能力没有被延时拖慢。 */
+[data-resize] { cursor: default; }
+
+/* 工具栏里的分隔线 / 弹性空隙 */
+.tb-sep { width: 1px; height: 15px; background: var(--divider); margin: 0 5px; flex: 0 0 1px; }
+.tb-spacer { flex: 1 1 auto; }
+
+/* 工具栏里的数字/状态文字（如缩放比例、文件名） */
+.wt-num {
+  font-size: 12px; color: var(--text-3);
+  min-width: 48px; text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- 预览窗口的「上一个 / 下一个」翻页按钮 ----
+   需求（原文）：「在预览窗口，增加可以切换上一个和下一个文件。
+   这样的预览和编辑 不单独打开窗口。类似看图片上一张，下一张这样。」
+
+   设计要点：
+     · 与窗口三键（.tb-btn）同款外观，但**独立类名** nav-btn，
+       避免 .tb-btn.close 那类特殊样式被误套；
+     · 位置计数用等宽数字，翻页时数字跳动不会让按钮左右晃；
+     · 到头（第一个/最后一个）时置灰不可点，而不是隐藏 ——
+       位置稳定，用户能预期「还能往前翻」还是「已经到头」。 */
+.tb-btn.nav-btn {
+  width: 26px; height: 22px;
+  border-radius: 4px;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.tb-btn.nav-btn svg { width: 12px; height: 12px; }
+.tb-btn.nav-btn:disabled {
+  opacity: .35; cursor: default; background: transparent;
+}
+.tb-btn.nav-btn:disabled:hover { background: transparent; }
+
+/* 翻页位置：n / m（等宽，避免跳动） */
+.wt-num.nav-pos {
+  min-width: 46px; text-align: center;
+  font-variant-numeric: tabular-nums;
+  font-size: 11.5px; color: var(--text-3);
+}
+
+/* 内容填充区：让 iframe / 画布 / 媒体撑满剩余空间。
+   必须 min-height:0，否则 flex 子项不会收缩，会把内容顶出可视区。
+   overflow:hidden —— OnlyOffice 的 host 用 position:absolute inset:0 定位，
+   母元素一旦被撑高，编辑器画布就会溢出窗口边框，这里直接裁掉。 */
+.win-fill { flex: 1; min-height: 0; position: relative; display: flex; overflow: hidden; }
+
+/* ---- 窗口拖拽 / 缩放期间的整屏遮罩 ----
+   为什么需要它（用户原文：「窗口拖动的位置 有时不能跟随鼠标位置。」）：
+     预览/编辑窗口的内容是 iframe。拖动时窗口跟手有一帧延迟，快速拖动
+     会让鼠标指针短暂落到 iframe 上方 —— 而**指针一旦进入嵌套浏览上下文，
+     父文档的 mousemove 就不再触发**，拖动随即卡死（连 mouseup 都收不到，
+     于是「松手了窗口还粘着鼠标」）。
+   这层遮罩铺满视口、盖在包括 iframe 在内的一切之上，指针永远落在它上面，
+   父文档的 pointer 事件因此永不丢失。
+   z-index 取 9998：高于窗口/热区（900 级）与模态遮罩（9600），
+   但低于最顶层提示（若有）。pointer-events:auto 是必须的 —— 它就是要
+   吃掉指针事件（事件仍会冒泡到 window/document 的监听器）。
+   cursor 由 JS 按当前手势设置（move / n-resize / ne-resize …）。 */
+.wm-drag-shield {
+  position: fixed; inset: 0;
+  z-index: 9998;
+  display: none;
+  cursor: default;
+  /* 完全透明：不改变任何视觉，只做事件兜底 */
+  background: transparent;
+}
+.wm-drag-shield.on { display: block; }
+
+/* 窗口内容的标准列布局：工具栏在上，内容撑满其余。
+   所有窗口统一用这个类，避免各自写内联样式写歪。 */
+.win-col { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+
+/* 紧凑工具栏按钮：行高降到 29px 后，按钮也要跟着瘦身 */
+.win-toolbar .tbtn {
+  height: 23px; min-width: 23px; padding: 0 6px; border-radius: 4px;
+  display: inline-flex; align-items: center; gap: 5px;
+}
+.win-toolbar .tbtn svg { width: 13px; height: 13px; flex: 0 0 13px; }
+.win-toolbar .tbtn .tbtn-text { font-size: 12px; }
+
+/* 兼容旧类名（kk-toolbar / kk-wincontrols）—— 历史代码里还有引用，
+   保留一份等价样式，避免遗漏处样式崩掉。 */
+.toolbar.kk-toolbar { cursor: default; }
+.kk-wincontrols { display: flex; height: 100%; align-items: stretch; flex: 0 0 auto; }
+.kk-wincontrols .tb-btn { height: 100%; width: 34px; }
+.kk-wincontrols .tb-btn svg { width: 10px; height: 10px; }
+.kk-divider { width: 1px; height: 15px; background: var(--divider); margin: 0 5px; flex: 0 0 1px; }
+
+.tbtn {
+  height: 23px; min-width: 23px; padding: 0 7px;
+  display: inline-flex; align-items: center; gap: 5px;
+  background: none; border: 1px solid transparent;
+  border-radius: var(--radius-ctl); cursor: default;
+  transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
+}
+.tbtn svg { width: 14px; height: 14px; flex: 0 0 14px; }
+.tbtn .tbtn-text { font-size: 12.5px; }
+.tbtn:hover { background: var(--bg-hover); }
+.tbtn:active { background: var(--bg-press); }
+.tbtn:disabled { opacity: .38; }
+.tbtn:disabled:hover { background: none; }
+.tbtn.primary {
+  background: var(--accent); color: #fff;
+  border-color: var(--accent);
+}
+.tbtn.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+.tbtn.primary:active { background: var(--accent-press); }
+
+/* 当前生效态（如资源管理器的视图切换）：
+   置灰是逻辑上的「已在用」，但仍要让用户看出是选中项，故用强调色描边
+   而不是靠 disabled 的透明度——那样会显得像坏掉的按钮。 */
+.tbtn.active,
+.tbtn.active:disabled {
+  opacity: 1;
+  color: var(--accent);
+  background: var(--bg-hover);
+  border-color: var(--accent);
+}
+
+.tb-sep { width: 1px; height: 18px; background: var(--divider); margin: 0 4px; }
+.tb-spacer { flex: 1; }
+
+/* 搜索框 */
+.searchbox {
+  display: flex; align-items: center; gap: 6px;
+  height: 30px; padding: 0 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-strong);
+  border-bottom-width: 1px;
+  border-radius: var(--radius-ctl);
+  transition: border-color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+}
+.searchbox:focus-within {
+  border-color: var(--accent);
+  border-bottom-width: 2px;
+  padding-bottom: 0;
+}
+.searchbox svg { width: 14px; height: 14px; opacity: .6; }
+.searchbox input {
+  border: none; background: none; outline: none;
+  color: var(--text); font-size: 13px; width: 170px;
+  font-family: inherit;
+}
+.searchbox input::placeholder { color: var(--text-3); }
+
+/* ---- 地址栏 ---- */
+.addrbar {
+  height: var(--addrbar-h); flex: 0 0 var(--addrbar-h);
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--divider);
+  background: var(--bg-layer);
+}
+.nav-btn {
+  width: 30px; height: 30px;
+  display: grid; place-items: center;
+  background: none; border: none; border-radius: var(--radius-ctl);
+  cursor: default;
+  transition: background var(--t-fast) var(--ease);
+}
+.nav-btn svg { width: 15px; height: 15px; }
+.nav-btn:hover:not(:disabled) { background: var(--bg-hover); }
+.nav-btn:active:not(:disabled) { background: var(--bg-press); }
+.nav-btn:disabled { opacity: .32; }
+
+.crumbs {
+  flex: 1; min-width: 0;
+  display: flex; align-items: center;
+  height: 28px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-ctl);
+  padding: 0 4px;
+  overflow-x: auto; overflow-y: hidden;
+  scrollbar-width: none;
+}
+.crumbs::-webkit-scrollbar { display: none; }
+.crumb {
+  display: inline-flex; align-items: center;
+  height: 22px; padding: 0 8px;
+  border-radius: 3px; font-size: 12.5px;
+  cursor: default; white-space: nowrap;
+  transition: background var(--t-fast) var(--ease);
+}
+.crumb:hover { background: var(--bg-hover); }
+.crumb.current { font-weight: 600; }
+.crumb-sep { color: var(--text-3); font-size: 11px; padding: 0 1px; user-select: none; }
+
+/* ---- 文件区 ---- */
+.files-wrap {
+  flex: 1; position: relative; overflow: auto;
+  background: var(--bg-layer);
+}
+
+/* 网格视图 */
+.grid-view {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+  gap: 2px;
+  padding: 12px;
+  align-content: start;
+}
+.grid-view .tile {
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  padding: 14px 6px 10px;
+  border-radius: var(--radius-ctl);
+  cursor: default;
+  border: 1px solid transparent;
+  transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
+}
+.grid-view .tile:hover { background: var(--bg-hover); }
+.grid-view .tile.selected {
+  background: var(--bg-selected);
+  border-color: rgba(0,103,192,.34);
+}
+.tile .tile-img { width: 52px; height: 52px; display: grid; place-items: center; }
+.tile .tile-img svg { width: 48px; height: 48px; }
+.tile .tile-thumb {
+  width: 52px; height: 52px; object-fit: cover;
+  border-radius: 4px; background: var(--bg-hover);
+}
+.tile .tile-name {
+  font-size: 12.5px; line-height: 1.3; text-align: center;
+  max-width: 100px;
+  overflow: hidden; text-overflow: ellipsis;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  word-break: break-all;
+}
+
+/* 列表视图 */
+.list-view { width: 100%; border-collapse: collapse; }
+.list-view thead th {
+  position: sticky; top: 0; z-index: 2;
+  background: var(--bg-layer);
+  font-size: 12px; font-weight: 400; color: var(--text-2);
+  text-align: left; padding: 0 8px;
+  height: 32px;
+  border-bottom: 1px solid var(--divider);
+  cursor: default;
+  white-space: nowrap;
+}
+.list-view thead th:hover { background: var(--bg-hover); }
+.list-view tbody tr {
+  height: 30px; cursor: default;
+  transition: background var(--t-fast) var(--ease);
+}
+.list-view tbody tr:hover { background: var(--bg-hover); }
+.list-view tbody tr.selected { background: var(--bg-selected); }
+.list-view td {
+  padding: 0 8px; font-size: 12.5px;
+  border-bottom: 1px solid transparent;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.list-view td.cell-name { display: flex; align-items: center; gap: 8px; height: 30px; }
+.list-view td.cell-name svg { width: 16px; height: 16px; flex: 0 0 16px; }
+.list-view td.num, .list-view th.num { text-align: right; }
+.list-view .row-thumb {
+  width: 16px; height: 16px; object-fit: cover; border-radius: 2px; flex: 0 0 16px;
+}
+
+/* ==========================================================================
+   内部拖拽移动（把一个/多个条目拖到文件夹上 → 移动过去）
+   --------------------------------------------------------------------------
+   需求（原文）：「文件夹窗口中，鼠标左键点住文件或文件夹图标，可以进行
+   拖动，拖到指定文件夹中进行移动。」
+   -------------------------------------------------------------------------- */
+
+/* 拖拽源：正在被拖的那些条目变半透明，视觉上明确"我抓住的是它们" */
+.grid-view .tile.dragging,
+.list-view tbody tr.dragging {
+  opacity: .45;
+}
+
+/* 拖拽目标：文件夹条目高亮，并画一圈虚线，明确"松手会放到这里" */
+.grid-view .tile.drop-target {
+  background: var(--bg-selected);
+  outline: 1.5px dashed var(--accent);
+  outline-offset: -2px;
+  border-radius: 4px;
+}
+.list-view tbody tr.drop-target {
+  background: var(--bg-selected);
+  box-shadow: inset 0 0 0 1.5px var(--accent);
+}
+
+/* 拖到窗口空白处：目标是"当前目录"，用更弱的提示（不需要虚线框） */
+.grid-view.drop-target-cwd,
+.list-view.drop-target-cwd {
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+}
+
+/* 空目录 / 加载 / 错误 */
+.state-box {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 10px;
+  color: var(--text-3); text-align: center; padding: 24px;
+}
+.state-box svg { width: 56px; height: 56px; opacity: .32; }
+.state-box .sb-title { font-size: 15px; color: var(--text-2); }
+.state-box .sb-hint { font-size: 12.5px; max-width: 380px; line-height: 1.6; }
+
+.spinner {
+  width: 26px; height: 26px;
+  border: 2.5px solid var(--border-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin .7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---- 状态栏 ---- */
+.statusbar {
+  height: var(--statusbar-h); flex: 0 0 var(--statusbar-h);
+  display: flex; align-items: center; gap: 14px;
+  padding: 0 12px;
+  font-size: 11.5px; color: var(--text-3);
+  border-top: 1px solid var(--divider);
+  background: var(--bg-layer);
+}
+.statusbar .sb-right { margin-left: auto; display: flex; gap: 14px; align-items: center; }
+
+
+/* ==========================================================================
+   任务栏
+   ========================================================================== */
+#taskbar {
+  position: fixed; left: 0; right: 0; bottom: 0;
+  height: var(--taskbar-h);
+  background: var(--bg-acrylic);
+  backdrop-filter: blur(30px) saturate(160%);
+  -webkit-backdrop-filter: blur(30px) saturate(160%);
+  border-top: 1px solid var(--border);
+  box-shadow: var(--shadow-taskbar);
+  display: flex; align-items: center;
+  padding: 0 8px;
+  z-index: 9000;
+}
+.tb-center {
+  position: absolute; left: 50%; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 4px;
+}
+.tb-app {
+  position: relative;
+  width: 40px; height: 40px;
+  display: grid; place-items: center;
+  border-radius: var(--radius-ctl);
+  background: none; border: none; cursor: default;
+  transition: background var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
+}
+.tb-app:hover { background: var(--bg-hover); }
+.tb-app:active { transform: scale(.92); }
+.tb-app svg { width: 22px; height: 22px; }
+/* 运行指示条 */
+.tb-app .indicator {
+  position: absolute; bottom: 2px; left: 50%; transform: translateX(-50%);
+  width: 16px; height: 3px; border-radius: 2px;
+  background: var(--text-3);
+  opacity: 0;
+  transition: opacity var(--t) var(--ease), width var(--t) var(--ease),
+              background var(--t) var(--ease);
+}
+.tb-app.running .indicator { opacity: 1; }
+.tb-app.active .indicator { width: 22px; background: var(--accent); opacity: 1; }
+
+/* 右下角托盘 */
+.tb-tray {
+  margin-left: auto;
+  display: flex; align-items: center; gap: 4px;
+}
+.tray-btn {
+  height: 36px; padding: 0 8px;
+  display: flex; align-items: center; gap: 6px;
+  background: none; border: none; border-radius: var(--radius-ctl);
+  font-size: 12px; cursor: default;
+  transition: background var(--t-fast) var(--ease);
+}
+.tray-btn:hover { background: var(--bg-hover); }
+.tray-btn svg { width: 15px; height: 15px; }
+#clock { text-align: right; line-height: 1.25; font-size: 12px; }
+#clock .ck-date { display: block; font-size: 11.5px; color: var(--text-2); }
+
+
+/* ==========================================================================
+   开始菜单
+   ========================================================================== */
+#start-menu {
+  position: fixed;
+  left: 50%; bottom: calc(var(--taskbar-h) + 8px);
+  transform: translateX(-50%) translateY(14px) scale(.98);
+  width: 560px; max-width: calc(100vw - 24px);
+  max-height: min(640px, calc(100vh - var(--taskbar-h) - 40px));
+  background: var(--bg-acrylic);
+  backdrop-filter: blur(40px) saturate(170%);
+  -webkit-backdrop-filter: blur(40px) saturate(170%);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: var(--shadow-window);
+  display: flex; flex-direction: column;
+  opacity: 0; pointer-events: none;
+  transition: opacity var(--t) var(--ease), transform var(--t) var(--ease);
+  z-index: 9500;
+}
+#start-menu.open {
+  opacity: 1; pointer-events: auto;
+  transform: translateX(-50%) translateY(0) scale(1);
+}
+
+.start-search {
+  margin: 20px 24px 12px;
+  height: 34px;
+  display: flex; align-items: center; gap: 8px;
+  padding: 0 12px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-strong);
+  border-radius: 17px;
+}
+.start-search:focus-within { border-color: var(--accent); }
+.start-search svg { width: 15px; height: 15px; opacity: .6; }
+.start-search input {
+  flex: 1; border: none; background: none; outline: none;
+  color: var(--text); font-size: 13px; font-family: inherit;
+}
+
+/* 段标题「已固定 / 推荐的项目」由 .start-sect 渲染（见下），
+   旧的 .start-head 已随写死的标题一起从 index.html 删除，故此处样式一并移除。 */
+
+/* 网格滚动容器：里面是若干「段」（已固定 / 推荐的项目） */
+.start-body {
+  flex: 1; overflow-y: auto;
+  padding: 0 20px 16px;
+}
+.start-sect {
+  font-size: 11.5px; font-weight: 600; color: var(--text-3);
+  padding: 6px 4px 6px;
+}
+/* 真正的网格。与旧 .start-grid 视觉一致（4 列、细间距）。 */
+.start-grid-inner {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 2px;
+  align-content: start;
+}
+.start-empty {
+  color: var(--text-3); font-size: 12.5px;
+  padding: 24px 8px; text-align: center;
+}
+.start-app {
+  position: relative;
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  padding: 14px 6px 10px;
+  border-radius: var(--radius-ctl);
+  cursor: default; border: 1px solid transparent;
+  transition: background var(--t-fast) var(--ease);
+  text-align: center;
+}
+.start-app:hover { background: var(--bg-hover); }
+.start-app:active { background: var(--bg-press); }
+.start-app svg { width: 34px; height: 34px; }
+.start-app .sa-name {
+  font-size: 11.5px; line-height: 1.3;
+  overflow: hidden; text-overflow: ellipsis;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  word-break: break-all;
+  max-width: 100px;
+}
+/* 已固定磁贴左上角的图钉角标 */
+.start-app .sa-pin {
+  position: absolute; top: 5px; left: 7px;
+  width: 15px; height: 15px;
+  display: grid; place-items: center;
+  color: var(--accent); opacity: .85;
+}
+.start-app .sa-pin svg { width: 11px; height: 11px; }
+
+.start-foot {
+  border-top: 1px solid var(--divider);
+  height: 56px;
+  display: flex; align-items: center;
+  padding: 0 32px;
+  gap: 6px;
+}
+.start-user {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 10px; border-radius: var(--radius-ctl);
+  cursor: default;
+  transition: background var(--t-fast) var(--ease);
+}
+.start-user:hover { background: var(--bg-hover); }
+.avatar {
+  width: 30px; height: 30px; border-radius: 50%;
+  background: var(--accent); color: #fff;
+  display: grid; place-items: center;
+  font-size: 13px; font-weight: 600;
+  flex: 0 0 30px;
+}
+.start-user .su-name { font-size: 13px; }
+
+/* 页脚右侧动作区：关于本机 + 退出登录，两枚 icon-only 按钮并排。
+   ★ 原来是单个 .start-power 自己带 margin-left:auto 顶到右边；
+     现在按钮变两个，改由外层容器承担「推到最右」，按钮之间只留 gap。★ */
+.start-foot-actions {
+  margin-left: auto;
+  display: flex; align-items: center; gap: 2px;
+}
+.start-power {
+  width: 36px; height: 36px;
+  display: grid; place-items: center;
+  border-radius: var(--radius-ctl);
+  background: none; border: none; cursor: default;
+  transition: background var(--t-fast) var(--ease);
+}
+.start-power:hover { background: var(--bg-hover); }
+.start-power svg { width: 17px; height: 17px; }
+
+
+/* ==========================================================================
+   右键菜单
+   ========================================================================== */
+#ctx-menu {
+  position: fixed;
+  min-width: 216px;
+  max-width: 320px;
+  background: var(--bg-acrylic);
+  backdrop-filter: blur(30px) saturate(170%);
+  -webkit-backdrop-filter: blur(30px) saturate(170%);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-menu);
+  box-shadow: var(--shadow-menu);
+  padding: 5px;
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(.97) translateY(-4px);
+  transform-origin: top left;
+  transition: opacity 110ms var(--ease), transform 110ms var(--ease);
+  z-index: 9800;
+}
+#ctx-menu.open { opacity: 1; pointer-events: auto; transform: scale(1) translateY(0); }
+
+.ctx-item {
+  display: flex; align-items: center; gap: 11px;
+  height: 32px; padding: 0 10px;
+  border-radius: 4px; cursor: default;
+  font-size: 13px;
+  transition: background var(--t-fast) var(--ease);
+}
+.ctx-item:hover { background: var(--bg-hover); }
+.ctx-item:active { background: var(--bg-press); }
+.ctx-item.disabled { opacity: .4; pointer-events: none; }
+.ctx-item.danger:hover { background: var(--danger-soft); color: var(--danger); }
+.ctx-item svg { width: 15px; height: 15px; flex: 0 0 15px; }
+.ctx-item .ci-label {
+  flex: 1;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ctx-item .ci-accel { font-size: 11.5px; color: var(--text-3); }
+.ctx-sep { height: 1px; background: var(--divider); margin: 4px 8px; }
+
+
+/* ==========================================================================
+   对话框 / 弹窗
+   ========================================================================== */
+.modal-mask {
+  position: fixed; inset: 0; z-index: 9600;
+  background: rgba(0,0,0,.30);
+  display: grid; place-items: center;
+  opacity: 0; pointer-events: none;
+  transition: opacity var(--t) var(--ease);
+}
+.modal-mask.open { opacity: 1; pointer-events: auto; }
+
+.dialog {
+  width: min(440px, calc(100vw - 40px));
+  background: var(--bg-mica);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-win);
+  box-shadow: var(--shadow-window);
+  overflow: hidden;
+  transform: scale(.96);
+  transition: transform var(--t) var(--ease);
+}
+.modal-mask.open .dialog { transform: scale(1); }
+.dialog.wide { width: min(760px, calc(100vw - 40px)); }
+
+.dlg-head {
+  padding: 20px 24px 0;
+  font-size: 17px; font-weight: 600;
+}
+.dlg-body { padding: 12px 24px 20px; font-size: 13.5px; color: var(--text-2); line-height: 1.65; }
+.dlg-body p { margin: 8px 0; }
+.dlg-body strong { color: var(--text); }
+.dlg-foot {
+  background: var(--bg-layer);
+  border-top: 1px solid var(--divider);
+  padding: 16px 24px;
+  display: flex; gap: 8px; justify-content: flex-end;
+}
+
+.field { margin: 14px 0; }
+.field label {
+  display: block;
+  font-size: 12.5px; color: var(--text-2);
+  margin-bottom: 6px;
+  /* 标签与输入框内部文字左边缘对齐：
+     输入框有 10px 左内边距，标签补同样的缩进，视觉基线才一致。
+     （原来标签贴容器左边、文字贴输入框 10px 处，看起来像错位。） */
+  padding-left: 10px;
+}
+.field input[type=text], .field input[type=password], .field input[type=number], .field select {
+  width: 100%; height: 32px;
+  padding: 0 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-strong);
+  border-color: rgba(0,0,0,.16);
+  border-radius: var(--radius-ctl);
+  color: var(--text); font-size: 13px; font-family: inherit;
+  outline: none;
+  transition: border-color var(--t-fast) var(--ease);
+  /* ★ 预先占位 2px 边框，避免聚焦时 border 变粗把布局顶动 ★
+     原来 :focus 只把 border-bottom-width 改成 2px，控件会瞬间长高 1px，
+     两个输入框交替聚焦时看起来就是「对不齐 / 在跳动」。
+     改成始终 2px、默认用透明底色模拟 1px 观感，聚焦只换颜色。 */
+  box-sizing: border-box;
+}
+.field input:focus, .field select:focus {
+  border-color: var(--accent);
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+.field .hint { font-size: 11.5px; color: var(--text-3); margin-top: 5px; line-height: 1.5; }
+
+.btn {
+  height: 32px; padding: 0 18px;
+  border-radius: var(--radius-ctl);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-card);
+  cursor: default; font-size: 13px;
+  transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
+}
+.btn:hover { background: var(--bg-hover); }
+.btn:active { background: var(--bg-press); }
+.btn.primary {
+  background: var(--accent); color: #fff; border-color: var(--accent);
+}
+.btn.primary:hover { background: var(--accent-hover); }
+.btn.primary:active { background: var(--accent-press); }
+.btn.danger { background: var(--danger); color: #fff; border-color: var(--danger); }
+.btn.danger:hover { filter: brightness(1.08); }
+
+/* 危险操作二次确认里的文件列表 */
+.danger-list {
+  margin: 12px 0;
+  max-height: 168px; overflow-y: auto;
+  background: var(--bg-layer);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-ctl);
+  padding: 8px 12px;
+  font-size: 12.5px;
+  font-family: "Cascadia Mono", Consolas, monospace;
+}
+.danger-list div {
+  padding: 2px 0; color: var(--text-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* 警告条 */
+.alert {
+  display: flex; gap: 10px; align-items: flex-start;
+  padding: 10px 12px; border-radius: var(--radius-ctl);
+  font-size: 12.5px; line-height: 1.55;
+  margin: 10px 0;
+}
+.alert svg { width: 16px; height: 16px; flex: 0 0 16px; margin-top: 1px; }
+.alert.warn { background: rgba(157,93,0,.10); color: var(--warn); }
+.alert.danger { background: var(--danger-soft); color: var(--danger); }
+.alert.info { background: var(--accent-soft); color: var(--accent); }
+
+
+/* ==========================================================================
+   「关于本机」对话框
+   --------------------------------------------------------------------------
+   旧版 showAbout() 直接用了 .ip-row，但那套样式是 **.info-panel 专属**的
+   （见下方 .info-panel .ip-row），所以关于框里的行其实一直没有得到排版，
+   只是碰巧浏览器默认样式看得过去。这里给对话框自己的作用域补上完整样式。
+   ========================================================================== */
+.about-sect {
+  font-size: 11.5px; font-weight: 600; color: var(--text-3);
+  margin: 14px 0 6px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--divider);
+}
+.about-sect:first-of-type { margin-top: 4px; }
+
+.dialog .ip-row {
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 5px 0; font-size: 12.5px;
+}
+.dialog .ip-row .k { color: var(--text-3); flex: 0 0 84px; }
+.dialog .ip-row .v { color: var(--text); min-width: 0; word-break: break-all; }
+.dialog .ip-row .v-sub {
+  color: var(--text-3); font-size: 11.5px; margin-left: auto;
+}
+
+/* 磁盘占用条 */
+.disk-bar {
+  height: 6px; border-radius: 3px; margin: 8px 0 2px;
+  background: var(--bg-input);
+  overflow: hidden;
+}
+.disk-bar i {
+  display: block; height: 100%; border-radius: 3px;
+  background: var(--accent);
+  transition: width var(--t-med) var(--ease);
+}
+
+
+/* ==========================================================================
+   文件信息面板（右侧属性栏）
+   ========================================================================== */
+.info-panel {
+  width: 260px; flex: 0 0 260px;
+  border-left: 1px solid var(--divider);
+  background: var(--bg-panel);
+  overflow-y: auto;
+  padding: 16px;
+  display: none;
+}
+.info-panel.open { display: block; }
+.info-panel .ip-preview {
+  height: 150px;
+  display: grid; place-items: center;
+  background: var(--bg-layer);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-ctl);
+  margin-bottom: 14px;
+  overflow: hidden;
+}
+.info-panel .ip-preview svg { width: 64px; height: 64px; }
+.info-panel .ip-preview img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.info-panel .ip-name {
+  font-size: 13.5px; font-weight: 600; margin-bottom: 12px;
+  word-break: break-all; line-height: 1.4;
+}
+.info-panel .ip-row {
+  display: flex; justify-content: space-between; gap: 10px;
+  font-size: 12px; padding: 5px 0;
+  border-bottom: 1px solid var(--divider);
+}
+.info-panel .ip-row .k { color: var(--text-3); flex: 0 0 auto; }
+.info-panel .ip-row .v {
+  color: var(--text-2); text-align: right;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+
+/* ==========================================================================
+   查看器（图片 / 文本 / 媒体 / Office 承载）
+   ========================================================================== */
+/* ★ .viewer-frame 必须有确定高度 ★
+   iframe 的 HTML 默认尺寸是 150×300（replaced element 的默认值），
+   只写 flex:1 在**块级父元素**里毫无作用（flex 属性对非 flex item 无效），
+   于是 iframe 就停在 150px 高 —— 表现是预览窗口只有一条窄带，
+   里面的 SVG/PDF/Office 全被压在 150px 里。
+   所以：给死高度，并把承载它的父容器也变成 flex 列。 */
+.viewer-frame { flex: 1; width: 100%; height: 100%; min-height: 0; border: none; background: #fff; display: block; }
+/* openKK 里 iframe 的直接父级（flex:1 + position:relative 的壳） */
+.kk-frame-wrap { flex: 1; min-height: 0; position: relative; display: flex; }
+:root[data-theme="dark"] .viewer-frame { background: #1a1a1a; }
+
+/* ★ iframe 透明点击盾（shell.js 的路径 4）★
+   为什么要这层：
+     OnlyOffice / CAD / kkFileView 的预览都是 <iframe>。点在 iframe **内部**
+     时事件由 iframe 自己的浏览上下文消费，父文档一个都收不到；
+     跨域时连 contentWindow 都摸不到。于是「点窗口任意位置置顶」无从触发。
+   做法：在 iframe 上盖一层透明 div，它属于父文档，mousedown 必定冒泡到
+     窗口的捕获监听 → 置顶；置顶后 shell.js 立刻把它 pointer-events:none，
+     后续点击/滚动就正常穿进 iframe。
+   视觉上必须完全不可见，且不能拦截文字选择光标。 */
+.iframe-shield {
+  position: absolute; inset: 0; z-index: 5;
+  background: transparent; cursor: default;
+  /* 触摸设备也要能触发；不引入任何滚动/选中行为 */
+  touch-action: none;
+  -webkit-user-select: none; user-select: none;
+}
+
+.media-stage {
+  flex: 1; display: grid; place-items: center;
+  background: #111; overflow: auto; padding: 20px;
+}
+.media-stage img {
+  max-width: 100%; max-height: 100%;
+  object-fit: contain;
+  box-shadow: 0 8px 32px rgba(0,0,0,.5);
+}
+.media-stage video, .media-stage audio { max-width: 100%; }
+
+.text-view {
+  flex: 1; overflow: auto; margin: 0;
+  padding: 14px 18px;
+  font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
+  font-size: 12.5px; line-height: 1.6;
+  white-space: pre; tab-size: 4;
+  background: var(--bg-layer);
+  color: var(--text);
+  user-select: text;
+}
+
+/* 进度条（上传） */
+.progress-wrap { margin-top: 12px; }
+.progress-bar {
+  height: 4px; border-radius: 2px;
+  background: var(--border-strong);
+  overflow: hidden;
+}
+.progress-bar > i {
+  display: block; height: 100%; width: 0;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 140ms linear;
+}
+
+
+/* ==========================================================================
+   登录页
+   ========================================================================== */
+#login-screen {
+  position: fixed; inset: 0; z-index: 9900;
+  display: grid; place-items: center;
+  background-size: cover; background-position: center;
+  transition: opacity 300ms var(--ease);
+}
+#login-screen.hide { opacity: 0; pointer-events: none; }
+
+.login-card {
+  /* ★ 卡片加宽 ★
+     原 360px 时，两条输入框在 1080p 下明显偏窄、留白局促，
+     且「用户名 / 密码」标签与输入框内文字的左边缘不在一条线上。
+     加宽到 420px 后输入框长度舒展，标签/输入框/按钮三者左边缘对齐。 */
+  width: min(420px, calc(100vw - 40px));
+  background: var(--bg-acrylic);
+  backdrop-filter: blur(40px) saturate(170%);
+  -webkit-backdrop-filter: blur(40px) saturate(170%);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-win);
+  box-shadow: var(--shadow-window);
+  padding: 34px 32px 28px;
+  animation: win-in 260ms var(--ease);
+}
+.login-logo {
+  display: flex; flex-direction: column; align-items: center;
+  gap: 10px; margin-bottom: 26px;
+}
+.login-logo svg { width: 54px; height: 54px; }
+.login-logo .ll-title { font-size: 20px; font-weight: 600; }
+.login-logo .ll-sub { font-size: 12px; color: var(--text-3); }
+
+.login-card .field input { height: 36px; }
+.login-err {
+  display: none;
+  margin-top: 12px; padding: 9px 12px;
+  background: var(--danger-soft); color: var(--danger);
+  border-radius: var(--radius-ctl);
+  font-size: 12.5px;
+}
+.login-err.show { display: block; }
+/* 按钮与输入框同宽同高、左边缘对齐（.field 无左右外边距，三者天然同列） */
+.login-card .btn.primary {
+  width: 100%; height: 36px; margin-top: 22px;
+  font-size: 13.5px;
+}
+.login-foot {
+  margin-top: 20px; text-align: center;
+  font-size: 11.5px; color: var(--text-3); line-height: 1.6;
+}
+
+/* 首次进入的加载遮罩 */
+#boot {
+  position: fixed; inset: 0; z-index: 9950;
+  display: grid; place-items: center; gap: 16px;
+  background: var(--bg-desktop);
+  transition: opacity 260ms var(--ease);
+}
+#boot.hide { opacity: 0; pointer-events: none; }
+#boot .boot-inner {
+  display: flex; flex-direction: column; align-items: center; gap: 16px;
+  color: #fff;
+}
+#boot .boot-name { font-size: 15px; letter-spacing: .5px; opacity: .92; }
+
+
+/* ==========================================================================
+   Toast
+   ========================================================================== */
+#toasts {
+  position: fixed;
+  right: 16px; bottom: calc(var(--taskbar-h) + 16px);
+  display: flex; flex-direction: column-reverse; gap: 8px;
+  z-index: 9700; pointer-events: none;
+}
+.toast {
+  min-width: 240px; max-width: 340px;
+  background: var(--bg-acrylic);
+  backdrop-filter: blur(30px) saturate(170%);
+  -webkit-backdrop-filter: blur(30px) saturate(170%);
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-menu);
+  box-shadow: var(--shadow-menu);
+  padding: 11px 14px;
+  font-size: 12.5px; line-height: 1.5;
+  animation: toast-in 200ms var(--ease);
+  pointer-events: auto;
+}
+.toast.err { border-left-color: var(--danger); }
+.toast.ok { border-left-color: var(--ok); }
+.toast .t-title { font-weight: 600; margin-bottom: 2px; }
+.toast .t-msg { color: var(--text-2); word-break: break-word; }
+.toast.out { animation: toast-out 180ms var(--ease) forwards; }
+@keyframes toast-in {
+  from { opacity: 0; transform: translateX(24px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+@keyframes toast-out {
+  to { opacity: 0; transform: translateX(24px); }
+}
+
+
+/* ==========================================================================
+   小屏 / 移动端适配
+   --------------------------------------------------------------------------
+   NAS 用户经常用手机看一眼文件，所以窗口在小屏上要退化为全屏。
+   侧栏已整体移除，这里不再需要相关的隐藏规则。
+   不做花哨的响应式，只保证「能用」。
+   ========================================================================== */
+@media (max-width: 720px) {
+  :root {
+    --taskbar-h: 52px;
+  }
+  .window {
+    left: 0 !important; top: 0 !important;
+    width: 100% !important; height: 100% !important;
+    border-radius: 0; border: none;
+  }
+  .tb-btn.max { display: none; }
+  .grid-view { grid-template-columns: repeat(auto-fill, minmax(88px, 1fr)); }
+  .info-panel { position: absolute; right: 0; top: 0; bottom: 0; z-index: 10; }
+  #start-menu { width: calc(100vw - 16px); }
+  .start-grid-inner { grid-template-columns: repeat(3, 1fr); }
+  .searchbox input { width: 96px; }
+  .desk-icon { width: 72px; }
+}
+
+/* ==========================================================================
+   用户管理表（showUserAdmin）
+   ========================================================================== */
+.utable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.utable thead th {
+  position: sticky; top: 0; z-index: 1;
+  text-align: left;
+  padding: 9px 14px;
+  font-weight: 600; font-size: 11.5px;
+  color: var(--text-2);
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+}
+.utable tbody td {
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  vertical-align: middle;
+}
+.utable tbody tr { cursor: default; }
+.utable tbody tr:hover { background: var(--bg-hover); }
+.utable tbody tr.sel { background: var(--accent-soft); }
+.utable .u-dim { color: var(--text-3); font-size: 11.5px; }
+.utable .u-name { margin-left: 8px; font-weight: 500; }
+
+.u-avatar {
+  display: inline-grid; place-items: center;
+  width: 22px; height: 22px; border-radius: 50%;
+  background: var(--accent); color: #fff;
+  font-size: 11px; font-weight: 600;
+  vertical-align: middle;
+}
+
+.u-tag {
+  display: inline-block;
+  margin-left: 6px; padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 10.5px; line-height: 1.6;
+  color: var(--text-2);
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+}
+.u-tag.admin { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.u-tag.builtin { color: var(--danger); border-color: var(--danger); background: var(--danger-soft); }
+.u-tag.me { color: var(--ok); border-color: var(--ok); }
+
+/* 弹窗里的表单行（新建/编辑用户用） */
+.field { margin-bottom: 12px; }
+.field > label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 11.5px; color: var(--text-2);
+}
+.field > input[type="text"],
+.field > input[type="password"] {
+  width: 100%; box-sizing: border-box;
+  padding: 7px 9px;
+  font-size: 12.5px; font-family: inherit;
+  color: var(--text);
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  outline: none;
+}
+.field > input:focus { border-color: var(--accent); }
+
+.ckline {
+  display: flex; align-items: center; gap: 7px;
+  margin: 4px 0 8px;
+  font-size: 12.5px; color: var(--text);
+  cursor: pointer;
+}
+.ckline input[type="checkbox"] { cursor: pointer; }
+
+/* 高对比度 / 减少动效偏好 */
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}
+
+
+/* ==========================================================================
+   分享（对话框内）
+   --------------------------------------------------------------------------
+   需求（原文）：「增加文件分享的功能。」
+
+   结构：目标摘要 → 选项（有效期/次数/提取码/备注） → 链接结果 → 底部按钮
+   设计取舍：
+     - 选项用一排 label+控件（而不是多个 prompt 弹窗）：分享是"一次配好"的动作，
+       来回弹窗最烦。
+     - 创建后**原地**显示链接 + 复制按钮，不关对话框：最高频动作是拿链接。
+   ========================================================================== */
+.share-target {
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 9px 11px; margin-bottom: 12px;
+  background: var(--bg-hover);
+  border-radius: 5px;
+}
+.share-tname {
+  font-weight: 600; font-size: 13px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  min-width: 0;
+}
+.share-tsub { color: var(--text-3); font-size: 11.5px; flex: 0 0 auto; }
+
+.share-opts { display: flex; flex-direction: column; gap: 9px; }
+.share-opt {
+  display: grid; grid-template-columns: 104px 1fr;
+  align-items: center; gap: 10px;
+  font-size: 12.5px;
+}
+.share-opt > span { color: var(--text-2); }
+.share-opt select,
+.share-opt input[type="text"] {
+  height: 30px; padding: 0 8px;
+  font: inherit; font-size: 12.5px;
+  color: var(--text);
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px; outline: none;
+}
+.share-opt select:focus,
+.share-opt input:focus { border-color: var(--accent); }
+
+.share-result {
+  margin-top: 14px; padding-top: 12px;
+  border-top: 1px solid var(--divider);
+}
+.share-label { font-size: 11.5px; color: var(--text-3); margin-bottom: 6px; }
+.share-linkrow { display: flex; gap: 8px; }
+.share-linkrow input {
+  flex: 1; min-width: 0;
+  height: 32px; padding: 0 9px;
+  font: inherit; font-size: 12.5px;
+  color: var(--text);
+  background: var(--bg-input, var(--bg-card));
+  border: 1px solid var(--border-strong);
+  border-radius: 4px; outline: none;
+}
+.share-linkrow input:focus { border-color: var(--accent); }
+.share-hint { font-size: 11.5px; color: var(--text-3); margin-top: 7px; line-height: 1.5; }
+
+/* ---- 分享管理列表 ---- */
+.share-list { display: flex; flex-direction: column; gap: 6px; }
+.share-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-card);
+}
+.share-item.dead { opacity: .55; }
+.share-item-main { min-width: 0; flex: 1; }
+.share-item-name {
+  font-size: 12.5px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.share-item-sub {
+  font-size: 11.5px; color: var(--text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.share-item-btns { display: flex; gap: 6px; flex: 0 0 auto; }
+/* 列表里的按钮要更紧凑（对话框本身不大） */
+.share-item-btns .btn { height: 28px; padding: 0 11px; font-size: 12px; }

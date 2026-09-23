@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#0067c0">
+<!-- 分享页同样禁止收录：链接本身是私有的 -->
+<meta name="robots" content="noindex, nofollow, noarchive">
+<title>文件分享 · NebulaDisk</title>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<link rel="alternate icon" type="image/x-icon" href="/static/favicon.ico">
+<link rel="stylesheet" href="/static/css/share.css">
+</head>
+<body>
+
+<!-- ★ 启动数据由服务端注入： __SHARE_BOOT__ 会被替换成一个 JSON ★
+     （见 app/main.py 的 _render_share_page / _render_share_error）
+     这样页面一打开就知道：token / 名称 / 是否目录 / 是否已解锁 / 是否有密码。 -->
+<script id="share-boot">window.__SHARE__ = __SHARE_BOOT__;</script>
+
+<div id="share-app">
+  <!-- 顶栏 -->
+  <header class="sh-head">
+    <div class="sh-brand">
+      <svg viewBox="0 0 32 32" width="22" height="22" fill="none" aria-hidden="true">
+        <path d="M9 25a7 7 0 0 1 .7-13.9A8.8 8.8 0 0 1 26 13.3 6.4 6.4 0 0 1 25.3 25z"
+              fill="currentColor" fill-opacity=".9"/>
+      </svg>
+      <span>NebulaDisk 分享</span>
+    </div>
+    <div class="sh-meta" id="sh-meta"></div>
+  </header>
+
+  <!-- 主体：由 JS 按状态渲染（loading / error / locked / browse） -->
+  <main class="sh-main" id="sh-main">
+    <div class="sh-center">
+      <div class="spinner"></div>
+      <div class="sh-dim">正在载入…</div>
+    </div>
+  </main>
+
+  <footer class="sh-foot">
+    <span id="sh-path"></span>
+    <div class="sh-actions">
+      <button class="btn" id="sh-up" hidden>上一级</button>
+      <button class="btn" id="sh-dl" hidden>下载</button>
+    </div>
+  </footer>
+</div>
+
+<!-- 预览浮层 -->
+<div class="sh-viewer" id="sh-viewer" hidden>
+  <div class="sh-viewer-bar">
+    <span id="sh-viewer-name"></span>
+    <button class="btn" id="sh-viewer-close">关闭</button>
+  </div>
+  <div class="sh-viewer-body" id="sh-viewer-body"></div>
+</div>
+
+<div class="sh-toast" id="sh-toast" hidden></div>
+
+<script src="/static/js/share.js"></script>
+</body>
+</html>

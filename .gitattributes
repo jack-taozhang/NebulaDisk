@@ -1,0 +1,29 @@
+# 交付到 Linux 的脚本/源码一律 LF。
+# 本仓库是在 Windows 上维护的，若某天有人 `git init` 或换机器 clone，
+# 没有这一行就会按 core.autocrlf 把 .sh 变成 CRLF ——
+# 而 **Git Bash 容忍 CRLF、Linux 不容忍**，于是本地全绿、到 NAS 上才炸
+# （真实踩过：`set: pipefail: invalid option name`）。
+# 详见 nebula/tools/check_eol.py 与 nebula/README.md §10。
+* text=auto eol=lf
+
+# 上游 kkFileView 仓库（src/）本身就是 CRLF，保持原貌，不要动
+src/** -text
+
+# 二进制
+*.png binary
+*.jpg binary
+*.ico binary
+*.ttf binary
+*.woff binary
+*.woff2 binary
+*.jar binary
+*.zip binary
+*.gz binary
+*.tar binary
+
+# ★ 换行符护栏的「自检样本」必须保持原始字节，不能被归一化 ★
+#   crlf_bad.sh 是**故意**存成 CRLF 的样本，check_eol.py / run_static_checks.sh
+#   靠它验证护栏本身有效（见 check_eol.py 第 53-54 行的说明）。
+#   若被上面的 `* text=auto eol=lf` 归一化成 LF，护栏自检就永远"通过"，
+#   等于这条测试失去意义 —— 所以这里必须显式 -text。
+nebula/tools/_eol_fixtures/** -text

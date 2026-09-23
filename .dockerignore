@@ -1,0 +1,91 @@
+# =============================================================================
+# Docker 构建上下文排除清单
+#
+# 本仓库有两个构建，**上下文都是项目根**：
+#   A) 根 Dockerfile        → 基础镜像 kkfileview:5.0.2（需要 src/ 与 docker/）
+#   B) nebula/Dockerfile    → 应用镜像 nebula:1.0.0（需要 nebula/app|web|deploy|
+#                             overrides|requirements.txt）
+# 因此本文件只能排除「A、B 都不需要」的东西；只对 B 多余、但 A 需要的东西
+# （例如 src/、docker/）必须留在上下文里，它们由 nebula/Dockerfile.dockerignore
+# 另行排除。
+#
+# ★ 为什么要拆成两个文件 ★
+#   Docker 的 .dockerignore 只用「上下文根」那一份，**不会**读取子目录里
+#   名为 .dockerignore 的文件。要针对某个 Dockerfile 单独排除，必须命名为
+#   <Dockerfile 名>.dockerignore 并与该 Dockerfile 放在同一目录。
+#   原先 nebula/.dockerignore 就是这个坑：文件名不对 → 完全失效 →
+#   每次 docker build 都把 sample/(219MB)、docs/、tools/、nebula/.env
+#   一起打包传给 daemon（慢，且把本地密钥带进了构建上下文）。
+# =============================================================================
+
+# --- 版本控制与 IDE ---
+.git
+.gitignore
+.gitattributes
+.idea
+.vscode
+*.iml
+
+# --- 源码中构建不需要的部分 ---
+src/.git
+src/.github
+src/.workflow
+src/doc
+src/tests
+src/README.md
+src/README.cn.md
+src/AGENTS.md
+src/SECURITY.md
+src/SECURITY_CONFIG.md
+
+# Windows 便携版 LibreOffice（821MB），仅 dist-win32 打包用到，
+# Linux 镜像完全不需要。Dockerfile 会在 builder 里建同名空目录占位，
+# 避免 dist-win32 的 assembly fileSet 找不到目录。
+src/server/LibreOfficePortable
+
+# --- 构建产物 ---
+**/target/
+src/server/target
+
+# --- 运行期数据（挂载进容器，绝不打包） ---
+data/
+logs/
+cache/
+config/application.properties
+
+# --- 本地配置与密钥 ---
+.env
+nebula/.env
+nebula/.env.example
+# ★ deploy/ 下的 .env 系列也不许进构建上下文 ★
+#   deploy/.env       = 真实部署参数（含管理员密码、OnlyOffice JWT 密钥）
+#   deploy/.env.nas   = 目标机器的实参（同一类秘密）
+#   模板 deploy/.env.example 也不需要进镜像（它是给人看的），一起排掉。
+deploy/.env
+deploy/.env.*
+
+# --- nebula 侧：两个构建都不需要 ---
+# 体积大头是 sample/(测试用样本盘，200MB+) 与 docs/(截图)；tools/ 是开发期
+# 探针与测试套件。它们都不进镜像，也不该进构建上下文。
+nebula/sample/
+nebula/data/
+nebula/data-kk/
+nebula/tools/
+nebula/docs/
+nebula/selfcheck.py
+nebula/selfcheck.sh
+nebula/devserver.py
+nebula/build.sh
+nebula/docker-compose.yml
+nebula/ARCHITECTURE.md
+nebula/README.md
+
+# 会话/记忆数据
+.workbuddy/
+
+# 离线部署包（内含 docker save 出来的 1.8GB tar，绝不能进构建上下文）
+dist/
+
+# --- 系统垃圾 ---
+.DS_Store
+Thumbs.db

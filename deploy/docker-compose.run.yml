@@ -1,0 +1,235 @@
+# =============================================================================
+# NebulaDisk —— 部署编排（纯运行版）★ 本文件是**生成**的，不要手改 ★
+#
+#   由 deploy/gen-run-compose.py 从 docker-compose.yml 生成：
+#     · 剥掉所有 build: 段（运行期不需要、图形化容器管理器也不支持）
+#     · 每个服务加 pull_policy: never（只用本地已导入的镜像，绝不联网拉取）
+#
+#   要改行为 → 改 docker-compose.yml，然后重新生成：
+#       python3 deploy/gen-run-compose.py
+#
+#   用法（离线 / 图形化容器管理器）：
+#       docker compose -f <源码>/deploy/docker-compose.run.yml \
+#                      --project-directory <部署目录> up -d
+# =============================================================================
+
+# =============================================================================
+# NebulaDisk 部署编排 —— ★ 唯一真相，可 build ★
+#
+#   起栈（推荐）： bash deploy/up.sh <部署目录>
+#   手工等价：     docker compose -f <源码>/deploy/docker-compose.yml \
+#                                --project-directory <部署目录> up -d --build
+#
+#   纯运行版（不含 build:）由本文件机械生成，别手抄第二份：
+#       python3 deploy/gen-run-compose.py  →  docker-compose.run.yml
+#
+# -----------------------------------------------------------------------------
+# 两条设计约定（看懂这两条，整个文件就不用猜了）
+# -----------------------------------------------------------------------------
+#   ① 本文件只写「**随部署变化**」的东西。
+#      不变的默认值（容器内固定地址、kkFileView 开关、监听端口…）都在
+#      `nebula/Dockerfile` 的 ENV 里。这里再抄一遍只会造成两处漂移。
+#      ⇒ 找某个变量的默认值：先去 Dockerfile 里搜。
+#
+#   ② `.env` 里的变量一律 `NB_` 前缀，由本文件映射成容器内的 `NEBULA_*` / `KK_*`。
+#      绕一层是为了**不撞车**：容器里的 `NEBULA_*` 是产品自己的名字，
+#      而 `.env` 属于宿主环境，同名容易被外部环境变量意外覆盖。
+#
+#   踩坑记录、每个变量的含义、排查手册：见 deploy/README.md
+# =============================================================================
+
+name: nebuladisk
+
+# -----------------------------------------------------------------------------
+# 网络：三个服务共用一张，互相按容器名解析。名字固定成 nebula-net ——
+#   换编排文件时容器仍留在同一张网上。若用自动命名的 `<项目名>_default`，
+#   换一次编排就多一张网、容器被拆开 → OnlyOffice 解析不到 nebula，文档打不开。
+#
+# ★★ 这里**不能**改写成 `default: {name: nebula-net}` ★★
+#   compose 会给网络打标签 com.docker.compose.network=<本文件的 key>。
+#   改写后 key 变成 `default`，而既有网络的标签还是 `nebula-net` →
+#   compose 判定「找到一个同名但标签不对的网络」并**拒绝复用**：
+#       network nebula-net was found but has incorrect label
+#       com.docker.compose.network set to "nebula-net" (expected: "default")
+#   ⇒ key 与 name 保持一致最省事：key=nebula-net、name=nebula-net。
+#   想让各服务不必重复写 networks，用下面的 &common 锚点（只写一处）。
+# -----------------------------------------------------------------------------
+networks:
+  nebula-net:
+    name: nebula-net
+    driver: bridge
+
+# -----------------------------------------------------------------------------
+# 三个服务共用的三小块（YAML 锚点：一处定义，各服务 `<<: *common` 引入）
+# -----------------------------------------------------------------------------
+x-common: &common
+  restart: unless-stopped
+  networks:
+    - nebula-net
+
+x-tzenv: &tzenv
+  TZ: ${TZ:-Asia/Shanghai}
+
+services:
+
+  # ===========================================================================
+  # 云盘 + kkFileView（同一镜像里的两个进程，supervisord 编排）
+  # ===========================================================================
+  nebula:
+    image: nebula:${NB_VERSION:-1.0.0}
+    pull_policy: never          # 只用本地已导入的镜像
+    <<: *common
+    # 容器名必须与 NEBULA_BASE_URL 里的主机名一致（http://nebula:8088）
+    container_name: nebula
+
+    ports:
+      # 左边宿主机端口（可改），右边固定 8088
+      - "${NB_HOST_PORT:-8089}:8088"
+      # kkFileView 直连端口（排查用）。需要就把下面这行取消注释。
+      # - "${NB_KK_HOST_PORT:-8012}:8012"
+
+    volumes:
+      # 云盘数据：SQLite 用户库 + 会话密钥。**必须持久化**，否则重建容器就丢用户。
+      #   ⚠️ 目标 /var/lib/nebula 是产品固定值（同 Dockerfile 的 NEBULA_DATA_DIR）
+      - ${NB_DATA_DIR:-./data}:/var/lib/nebula
+      # kkFileView 的转换产物与日志（纯缓存，可随时删；删后要重启容器）
+      - ${NB_KK_FILE_DIR:-./data-kk/file}:/opt/kkFileView-5.0.2/file
+      - ${NB_KK_LOG_DIR:-./data-kk/log}:/opt/kkFileView-5.0.2/log
+
+      # ★ 共享盘**不在这里** ★
+      #   它们由 docker-compose.mounts.yml 提供（叠加在本文件之后）。
+      #   要增删盘：改**部署目录的 .env** 里的 NB_MOUNTS，然后跑
+      #       bash deploy/up.sh <部署目录>
+      #   原因：加一个盘原本要同时改「volumes 的绑定」和「NEBULA_MOUNTS 的声明」
+      #   两处，而两者必须逐字一致 —— 漏改的表现只是「盘不见了」，很难查。
+      #   现在两处由同一条数据机械派生，不可能对不上。
+
+    environment:
+      <<: *tzenv
+
+      # ---- 账号与密钥 ----
+      NEBULA_ADMIN_USER: ${NB_ADMIN_USER:-admin}
+      NEBULA_ADMIN_PASSWORD: ${NB_ADMIN_PASSWORD:-}
+      # 留空 = 自动生成到 /var/lib/nebula/secret.key 并持久复用
+      NEBULA_JWT_SECRET: ${NB_JWT_SECRET:-}
+
+      # ---- 外部引擎地址 ----
+      # raw 直链的对外基地址。★ 这是 **OnlyOffice 容器视角**，不是浏览器视角 ★
+      #   必须用容器间可达的名字 + **容器端口 8088**（不是宿主机映射端口）
+      NEBULA_BASE_URL: ${NB_BASE_URL:-http://nebula:8088}
+      NEBULA_OO_URL: ${NB_OO_URL:-http://onlyoffice:80}
+      # ★ 这个才是**浏览器视角**：填用户浏览器能访问到的地址
+      NEBULA_OO_PUBLIC: ${NB_OO_PUBLIC:-http://127.0.0.1:8082}
+      NEBULA_OO_SECRET: ${NB_OO_SECRET:-}
+      # 留空则该格式自动降级给 kkFileView
+      NEBULA_CAD_URL: ${NB_CAD_URL:-http://cad-viewer:8080}
+
+      # ---- 可选微调 ----
+      NEBULA_TITLE: ${NB_TITLE:-NebulaDisk}
+      NEBULA_LOG_LEVEL: ${NB_LOG_LEVEL:-info}
+      NEBULA_SESSION_HOURS: ${NB_SESSION_HOURS:-12}
+      NEBULA_MAX_UPLOAD_MB: ${NB_MAX_UPLOAD_MB:-2048}
+      JAVA_OPTS: ${NB_JAVA_OPTS:--XX:MaxRAMPercentage=45.0 -XX:+ExitOnOutOfMemoryError}
+
+    # LibreOffice 无头转换用 /dev/shm；Docker 默认 64MB 会让 soffice 被 SIGABRT 杀掉
+    shm_size: ${NB_SHM_SIZE:-2gb}
+
+    # kkFileView 要主动抓远程文件，容器内 DNS 必须可用
+    dns:
+      - ${NB_DNS_PRIMARY:-223.5.5.5}
+      - ${NB_DNS_SECONDARY:-119.29.29.29}
+
+    deploy:
+      resources:
+        limits:
+          memory: ${NB_MEMORY_LIMIT:-4g}
+
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8088/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 90s
+      retries: 5
+
+  # ===========================================================================
+  # OnlyOffice Document Server（官方镜像）
+  #   profile=bundled ⇒ `.env` 里 COMPOSE_PROFILES=bundled 时自动启用（默认）。
+  #   若 OO 跑在**别的** compose 项目里：把 COMPOSE_PROFILES 留空（本服务就不会被
+  #   创建），再叠加 deploy/docker-compose.dev.yml 让 nebula 加入它所在的外部网络。
+  # ===========================================================================
+  onlyoffice:
+    image: onlyoffice/documentserver:${NB_OO_VERSION:-latest}
+    pull_policy: never          # 只用本地已导入的镜像
+    profiles: ["bundled"]
+    <<: *common
+    # 容器名要与 NEBULA_OO_URL 的主机名一致（http://onlyoffice:80）。
+    # 容器名同时就是 hostname，不必再写 hostname:。
+    container_name: onlyoffice
+
+    ports:
+      - "${NB_OO_HOST_PORT:-8082}:80"
+
+    environment:
+      <<: *tzenv
+      JWT_ENABLED: "true"
+      # ★★ 必须与 nebula 的 NEBULA_OO_SECRET 完全一致 ★★
+      #   本编排两边读的是同一个变量，只要 .env 设了就不会不一致。
+      #   留空会**直接启动失败** —— 故意的：fail fast，而不是启动后表现为「文档打不开」。
+      JWT_SECRET: ${NB_OO_SECRET:?NB_OO_SECRET 必须设置，且与 nebula 的 NEBULA_OO_SECRET 一致}
+      JWT_HEADER: "Authorization"
+      JWT_IN_BODY: "true"
+
+    volumes:
+      # 可写宿主目录，也可写**卷名**（默认用下面的命名卷，更省心）
+      #   ★ 用宿主目录时属主必须是 ds(101:102)，否则转换会 EPERM ★
+      - ${NB_OO_DATA_DIR:-oo-data}:/var/www/onlyoffice/Data
+      - ${NB_OO_LOG_DIR:-oo-logs}:/var/log/onlyoffice
+      - ${NB_OO_LIB_DIR:-oo-lib}:/var/lib/onlyoffice
+      - ${NB_OO_DB_DIR:-oo-db}:/var/lib/postgresql
+
+    # ★ /tmp 必须挂 tmpfs 且**必须显式写 mode=1777** ★（converter 以非 root 的
+    #   ds(101) 运行，要在 /tmp 建 ASC_CONVERT*；少了它 = 「外壳能出来、正文报错」）
+    #   成因与排查见 deploy/README.md §6 与 deploy/diagnose-oo.sh（§4 专查这一项）
+    tmpfs:
+      - /tmp:rw,exec,size=2G,mode=1777
+
+    # OO 停止时要把内存里的文档落盘，给足时间
+    stop_grace_period: 60s
+
+  # ===========================================================================
+  # CAD 图纸查看器（dwg/dxf）
+  #   不走 kkFileView 的原因：Aspose.CAD 会转出「无 viewBox 的 1.6 亿像素 SVG」，
+  #   浏览器必然白屏。无状态：不挂任何卷，文件读写都在 nebula 容器里。
+  # ===========================================================================
+  cad-viewer:
+    image: nebula/cad-viewer:${NB_CAD_VERSION:-1.7.0}
+    pull_policy: never          # 只用本地已导入的镜像
+    profiles: ["bundled"]
+    <<: *common
+    # 容器名要与 NEBULA_CAD_URL 的主机名一致（http://cad-viewer:8080）
+    container_name: cad-viewer
+
+    ports:
+      # 浏览器直连（可选，不需要就删掉；云盘是按容器名反代的）
+      - "${NB_CAD_HOST_PORT:-8090}:8080"
+
+    environment:
+      <<: *tzenv
+      NODE_ENV: "production"
+      PORT: "8080"
+
+# -----------------------------------------------------------------------------
+# 命名卷：当 .env 里把 NB_OO_*_DIR 留成卷名（默认）时使用。
+#   ★ 比宿主目录省心：Docker 用「镜像内的内容 + 属主」初始化，
+#     不会像宿主目录那样把 ds(101:102) 盖成 root:root。
+# -----------------------------------------------------------------------------
+volumes:
+  oo-data:
+  oo-logs:
+  oo-lib:
+  oo-db:

@@ -1,0 +1,45 @@
+# legacy/ —— 历史一次性诊断脚本（非测试套件）
+
+这些脚本来自**已经结案的一次性排查**，不属于日常回归测试。
+保留在此仅作「当时是怎么定位的」的可追溯证据，**不必随版本更新维护**。
+
+判断某个脚本该不该进这里：
+- 它有对应的 `runner`（`*_run.sh`）→ 属于「活」的探针，留在 `tools/` 根；
+- 它的能力已被 `tools/_test_*.js` / `_test_*.py` 套件覆盖 → 进这里。
+
+---
+
+## 文件说明
+
+### 基础镜像 / jar 内容核查
+| 文件 | 用途 |
+|---|---|
+| `jar_check.py` | 列出 `kkFileView-*.jar` 内 `BOOT-INF/classes/web/*.ftl` 条目，确认模板覆盖目标存在 |
+| `check_compress_css.py` | 检查 compress 预览页的 CSS 引用是否齐全 |
+
+### SVG / CAD / DWG 预览链路排查
+| 文件 | 用途 |
+|---|---|
+| `check_svg_math.js` | 浏览器端校验 SVG 视图框换算（缩放/平移矩阵） |
+| `check_svg_page.py` | 抓取 SVG 预览页 HTML 做结构断言 |
+| `dump_dwg_page.py` | dump DWG 预览页 DOM，确认是否走 cad-viewer |
+| `o3dv_ext_probe.py` | 探测 o3dv（3D 查看器）扩展资源的可用性 |
+| `probe_dwg.py` / `probe_dwg_full.js` / `probe_dwg_render.js` | DWG 渲染链路三道探针（越靠后越完整，`_render` 为最终版） |
+| `probe_cad_e2e.py` | CAD 预览端到端探针（登录 → 打开 dwg → 断言走 cad-viewer） |
+| `probe_cad_origin.py` | 定位 CAD iframe 的来源地址（跨域/内网地址推导） |
+| `cad-ref/cad-client.js` | cad-client.js 留档。**注意：本文件同时是当前生产版本的来源** —— 它被 `docker cp` 进 `cad-viewer` 容器并 commit 成镜像 （原因：cad-viewer 源码树不完整、无法重建镜像，只能热修补再固化）。任务 #68 已删掉「← 文件库」返回入口，当前 sha256 `d1e2e7b5…` |
+
+### 会话
+| 文件 | 用途 |
+|---|---|
+| `probe_session.py` | 最小登录/会话票据探针，用于排查 401 类问题 |
+
+---
+
+## 结论去哪儿看
+
+这些脚本的**结论**记录在：
+- `.workbuddy/memory/2026-09-20.md`（按时间线的排查过程）
+- `nebula/docs/预览引擎深链契约.md`（最终确定的深链契约）
+
+要看行为是否符合预期，请跑 `../run_unit_tests.sh` 与 `../selfcheck.py`，而不是这些脚本。

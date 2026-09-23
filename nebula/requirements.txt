@@ -1,0 +1,8 @@
+# NebulaDisk 后端依赖
+# 版本用兼容范围而不是死钉，NAS 上 arm64/amd64 都能装上预编译轮子。
+
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+python-multipart>=0.0.9          # FastAPI 的 Form/File 解析必需
+httpx>=0.27,<1.0                 # 反代 kkFileView + 下载 OnlyOffice 产物
+bcrypt>=4.1,<5.0                 # 密码哈希（纯轮子，不需要编译）

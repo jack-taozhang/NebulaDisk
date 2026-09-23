@@ -1,0 +1,194 @@
+# =============================================================================
+# NebulaDisk —— 云盘（含 kkFileView）部署编排
+#
+#   启动：  docker compose -f nebula/docker-compose.yml up -d
+#   日志：  docker compose -f nebula/docker-compose.yml logs -f nebula
+#   停止：  docker compose -f nebula/docker-compose.yml down
+#
+# 架构：
+#   nebula 容器 = kkFileView(8012) + NebulaDisk(8088)，由 supervisord 拉起
+#   OnlyOffice  = 复用已有容器，通过外部网络服务名接入（不在此文件里启动）
+#
+# ★ 关键：本容器必须与 OnlyOffice 在同一 docker 网络上 ★
+#   OnlyOffice 是**服务端**去 GET 文档的，它必须能解析并连上本容器。
+#   这里用 external network 接入已有的 deploy_default（OnlyOffice 所在网络）。
+#
+# 环境变量统一放 nebula/.env，不写死在本文件里。
+# =============================================================================
+
+name: nebula
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # NebulaDisk —— 云盘 + kkFileView（单镜像双进程）
+  # ---------------------------------------------------------------------------
+  nebula:
+    image: ${NB_IMAGE:-nebula:1.0.0}
+    build:
+      context: ..                        # 仓库根目录（需能访问 nebula/ 与基础镜像）
+      dockerfile: nebula/Dockerfile
+      # ⚠️ 本机必需：WSL2 的 /etc/resolv.conf 指向 10.255.255.254，
+      #    该 DNS 在 docker bridge 网段不可达，构建期装 apt 包必失败。
+      network: host
+      args:
+        KK_BASE_IMAGE: ${NB_BASE_IMAGE:-kkfileview:5.0.2}
+        APT_MIRROR: ${NB_APT_MIRROR:-mirrors.aliyun.com}
+        NEBULA_VERSION: ${NB_VERSION:-1.0.0}
+
+    container_name: nebula
+    restart: unless-stopped
+
+    ports:
+      # 云盘界面（仿 Windows）。宿主机端口可改，容器内固定 8088。
+      # ⚠️ 默认 8089：本机 8080 被 maple-cloud、8081 被 maple-cad-viewer、
+      #    8082 被 maple-onlyoffice、8088 被 jmalcloud 占用，故避开这些。
+      - "${NB_HOST_PORT:-8089}:8088"
+      # kkFileView 独立端口。一般不需要直接访问（云盘已把预览反代到同源），
+      # 但保留端口便于单独排查 kkFileView 问题。不需要可注释掉。
+      # ⚠️ 本机 8012 已被独立的 kkfileview 容器占用，故默认不映射；
+      #    需要时改 NB_KK_HOST_PORT 再放开。
+      # - "${NB_KK_HOST_PORT:-8013}:8012"
+
+    # -------------------------------------------------------------------------
+    # 目录映射（★ 用户需求：「配置多个宿主机目录」）
+    #
+    # 左边宿主机路径 : 右边容器内路径（只读/读写按需加 :ro）
+    # 右边这个路径要写进下面的 NEBULA_MOUNTS 里。
+    #
+    # 例：把 NAS 上的 /volume1/共享 和 /volume2/照片 映射进来
+    #   - /volume1/共享:/mnt/share
+    #   - /volume2/照片:/mnt/photos
+    #   - /volume1/私密:/mnt/private
+    # -------------------------------------------------------------------------
+    volumes:
+      # 云盘数据（SQLite 用户库 + 会话密钥，必须持久化）
+      - ${NB_DATA_DIR:-./data}:/var/lib/nebula
+      # kkFileView 的转换产物与日志
+      - ${NB_KK_FILE_DIR:-./data-kk/file}:/opt/kkFileView-5.0.2/file
+      - ${NB_KK_LOG_DIR:-./data-kk/log}:/opt/kkFileView-5.0.2/log
+
+      # ===== 下面按需改成你的真实宿主机目录 =====
+      - ${NB_SHARE_DIR:-./sample/share}:/mnt/share
+      - ${NB_PHOTOS_DIR:-./sample/photos}:/mnt/photos
+      - ${NB_PRIVATE_DIR:-./sample/private}:/mnt/private
+
+    environment:
+      TZ: "${TZ:-Asia/Shanghai}"
+
+      # ---------------- 目录映射（与上面 volumes 的容器内路径一一对应）------
+      # 格式：显示名|容器内路径|可见用户
+      #   第三段用 * 表示所有登录用户可见；多个用户用逗号分隔。
+      #   用 ; 分隔多条映射。
+      NEBULA_MOUNTS: "${NEBULA_MOUNTS:-共享|/mnt/share|*;照片|/mnt/photos|*;私密|/mnt/private|admin}"
+
+      # ---------------- 云盘基础 ----------------
+      NEBULA_TITLE: "${NB_TITLE:-NebulaDisk}"
+      NEBULA_DATA_DIR: "/var/lib/nebula"
+      NEBULA_PORT: "8088"
+      NEBULA_LOG_LEVEL: "${NB_LOG_LEVEL:-info}"
+
+      # ★ 关键：raw 取流直链对外暴露的基地址。
+      #   OnlyOffice 在**另一个容器**里回拉这个地址，所以**不能**填
+      #   127.0.0.1（那是 OnlyOffice 自己），必须填本容器在本网络里的名字。
+      #   同网络的容器用服务名 nebula + 容器端口 8088 即可解析。
+      #   kkFileView 与本服务同容器，访问这个地址也没问题。
+      NEBULA_BASE_URL: "${NB_BASE_URL:-http://nebula:8088}"
+
+      # ---------------- 管理员账号（首次启动创建）----------------
+      NEBULA_ADMIN_USER: "${NB_ADMIN_USER:-admin}"
+      # 留空则首启随机生成强密码并打到容器日志，用
+      #   docker logs nebula | grep 管理员
+      # 取回。强烈建议显式设置。
+      NEBULA_ADMIN_PASSWORD: "${NB_ADMIN_PASSWORD:-}"
+      NEBULA_SESSION_HOURS: "${NB_SESSION_HOURS:-12}"
+      NEBULA_MAX_UPLOAD_MB: "${NB_MAX_UPLOAD_MB:-2048}"
+
+      # ---------------- 会话密钥 ----------------
+      # 留空则自动生成到 /var/lib/nebula/secret.key（持久卷上，重启不掉线）。
+      # 多实例部署时务必显式设置成同一个值。
+      NEBULA_JWT_SECRET: "${NB_JWT_SECRET:-}"
+
+      # ---------------- kkFileView（同镜像内的另一个进程）----------------
+      NEBULA_PREVIEW: "http://127.0.0.1:8012"
+      # 浏览器访问预览的路径前缀。云盘内部会把它反代到 kkFileView，
+      # 从而实现「预览页与云盘同源」，彻底绕开 iframe 跨域。
+      NEBULA_PREVIEW_PUBLIC: "/preview"
+
+      # ---------------- OnlyOffice（复用已有容器）----------------
+      # ★ 服务端地址：容器间互通，用**服务名**或容器 IP。
+      NEBULA_OO_URL: "${NB_OO_URL:-http://maple-onlyoffice}"
+      # ★ 浏览器地址：用户浏览器能访问到的地址，必须是宿主机 IP 或域名。
+      #   填 127.0.0.1 只在「浏览器也在本机」时可用；NAS 上要填 NAS 的真实 IP。
+      NEBULA_OO_PUBLIC: "${NB_OO_PUBLIC:-http://192.168.1.10:8082}"
+      # ★ 必须与 OnlyOffice 容器的 JWT_SECRET 完全一致，否则签名验不过。
+      NEBULA_OO_SECRET: "${NB_OO_SECRET:-}"
+
+      # ---------------- CAD 图纸预览（独立的 cad-viewer 服务）----------------
+      # ★ 设计要点：dwg/dxf 不再走 kkFileView，而是交给 cad-viewer 渲染，
+      #   因为 kkFileView 的 Aspose.CAD 输出的是「无 viewBox 的 1.6 亿像素 SVG」，
+      #   浏览器端必然白屏；cad-viewer 是专门的图纸引擎，支持测量/图层/写回。
+      # ★ 地址分两类，切勿混用（这是本项目历史上反复踩的坑）：
+      #   NEBULA_CAD_URL   —— 容器间互通地址；既用于健康探测，也用于 /cad 反代。
+      #   NEBULA_CAD_PROBE —— 探测地址，缺省与 URL 相同。
+      # ★ 浏览器直连地址**刻意不做成配置项**：/api/cad/preview 会按请求的
+      #   Host 头自动推导（_origin(request)），这样换域名/换端口/NAS 迁移
+      #   都不必改配置，也不会出现「配置写容器名导致浏览器 Failed to fetch」。
+      NEBULA_CAD_URL: "${NB_CAD_URL:-http://maple-cad-viewer:8080}"
+      NEBULA_CAD_PROBE: "${NB_CAD_PROBE:-http://maple-cad-viewer:8080}"
+
+      # ---------------- kkFileView 自身参数 ----------------
+      JAVA_OPTS: "${NB_JAVA_OPTS:--XX:MaxRAMPercentage=45.0 -XX:+ExitOnOutOfMemoryError}"
+      KK_TRUST_HOST: "*"
+      KK_BASE_URL: "default"
+      KK_CACHE_TYPE: "jdk"
+      KK_OFFICE_PREVIEW_TYPE: "pdf"
+      KK_OFFICE_QUALITY: "80"
+      # 只留一个 soffice 实例：容器内并行冷启动会互相抢占，
+      # 默认 2001,2002 反而两个都起不来。
+      OFFICE_PLUGIN_SERVER_PORTS: "2001"
+      KK_DELETE_PASSWORD: "false"
+
+    # LibreOffice 无头转换用 /dev/shm，默认 64MB 会让 soffice 被 SIGABRT 杀掉
+    shm_size: "${NB_SHM_SIZE:-2gb}"
+
+    # kkFileView 要主动去抓远程文件，容器内 DNS 必须可用
+    dns:
+      - ${NB_DNS_PRIMARY:-223.5.5.5}
+      - ${NB_DNS_SECONDARY:-119.29.29.29}
+
+    deploy:
+      resources:
+        limits:
+          memory: ${NB_MEMORY_LIMIT:-4g}
+
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+
+    healthcheck:
+      # 探云盘自己的健康接口：它同时反映 kkFileView 与 OnlyOffice 的状态
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8088/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 90s
+      retries: 5
+
+    networks:
+      - default          # 本 compose 的内部网络
+      - oonet            # 复用 OnlyOffice 所在的外部网络
+
+# -----------------------------------------------------------------------------
+# 网络
+#
+# oonet 指向一个**已存在**的 docker 网络（OnlyOffice 所在的那个）。
+# 先确认它的真名：docker network ls
+# 如果 OnlyOffice 的 compose 项目名是 deploy，网络通常叫 deploy_default。
+# -----------------------------------------------------------------------------
+networks:
+  default:
+    name: nebula_default
+  oonet:
+    external: true
+    name: ${NB_OO_NETWORK:-deploy_default}

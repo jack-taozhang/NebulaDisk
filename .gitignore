@@ -1,0 +1,25 @@
+# 运行期数据（转换产物、日志、缓存），不入库
+data/
+logs/
+cache/
+
+# 本地环境配置
+.env
+
+# kkFileView 源码（按需 clone，不入库）
+src/
+
+# 构建产物
+**/target/
+
+# 编辑器与系统文件
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# 本地覆盖（含测试口令等），不入库
+.env.local
+*.secret
+*.key

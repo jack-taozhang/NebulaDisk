@@ -1,0 +1,118 @@
+"""CAD 图纸查看器的同源反代（/cad/*）与预览地址"""
+
+from __future__ import annotations
+
+from urllib.parse import urlencode, urlsplit
+
+import httpx
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import HTMLResponse, Response
+from .. import auth, files
+from ..config import settings
+from ..webutil import _origin, _internal_origin, _mount, make_raw_url
+
+
+router = APIRouter()
+
+@router.get("/api/cad/preview")
+async def api_cad_preview(
+    request: Request,
+    mount: str, path: str, user: dict = Depends(auth.current_user),
+):
+    """返回 cad-viewer 的深链地址（同源反代路径）。
+
+    cad-viewer 的约定（见其 server.cjs / cad-client.js）：
+        ?open=<图纸的可下载 URL>&name=<文件名>
+    它会自己 fetch 这个 URL 拿字节，喂给 WASM 渲染器。
+
+    ★ open 里的地址必须是**浏览器可达**的 ★
+      cad-viewer 的渲染发生在浏览器里（WASM），fetch 由浏览器发起。
+      所以这里必须用 _origin(request) 拼地址，绝不能用 NEBULA_BASE_URL
+      （那是 http://nebula:8088，浏览器解析不了 → 页面报 "Failed to fetch"）。
+      这和当初 kkFileView 的 X-Base-Url 是同一类坑。
+    """
+    m = _mount(user["username"], mount)
+    p = files.resolve(m, path)
+    if p.is_dir():
+        raise HTTPException(400, "目录不支持预览")
+
+    if not settings.cad_enabled:
+        raise HTTPException(503, "未配置 CAD 查看器（NEBULA_CAD_URL）")
+
+    # ★ 给浏览器用的图纸直链，必须把 Host 换成**浏览器侧**的地址 ★
+    #
+    # make_raw_url() 返回的是 {_internal_origin()}/api/raw/...，即
+    #   http://nebula:8088/api/raw/xxx.dwg?...
+    # 这个地址是给 OnlyOffice / kkFileView 这类「同网络的容器」回拉用的。
+    # 而 cad-viewer 的取流发生在**浏览器**里（WASM 渲染器自己 fetch），
+    # 浏览器解析不了 nebula 这个 docker 内部名字 → 图纸页报 "Failed to fetch"。
+    #
+    # 所以这里只保留 raw 的**路径与查询串**，host 换成 _origin(request)。
+    # 不能用 settings.base_url，也绝不能原样透传 —— 这正是
+    # 「服务端正常、浏览器打不开」这类 bug 的经典成因。
+    internal = urlsplit(make_raw_url(mount, path, ttl=3600))
+    public_raw = f"{_origin(request)}{internal.path}"
+    if internal.query:
+        public_raw += f"?{internal.query}"
+
+    q = urlencode({"open": public_raw, "name": p.name})
+    # 深链走**同源反代**前缀 /cad，避免暴露 cad-viewer 的独立端口、
+    # 也顺带绕开跨域与混合内容问题。
+    url = f"/cad/?{q}"
+    return {"ok": True, "url": url, "raw": public_raw}
+
+
+@router.api_route("/cad/{rest:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"])
+async def proxy_cad(rest: str, request: Request):
+    """把 /cad/* 反代到 cad-viewer。
+
+    和 /preview 反代同理：同源 iframe 不被跨域策略拦，只暴露一个端口。
+    """
+    base = settings.cad_probe or settings.cad_url
+    if not base or base.startswith("/"):
+        return HTMLResponse(
+            "<h3>CAD 查看器未配置</h3>"
+            "<p>请设置 NEBULA_CAD_URL（浏览器地址）与 NEBULA_CAD_PROBE（容器地址）</p>",
+            status_code=503,
+        )
+
+    target = f"{base.rstrip('/')}/{rest}"
+    if request.url.query:
+        target += f"?{request.url.query}"
+
+    fwd_headers: dict[str, str] = {}
+    for k in ("accept", "accept-language", "content-type", "range", "user-agent"):
+        v = request.headers.get(k)
+        if v:
+            fwd_headers[k] = v
+
+    body = await request.body()
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0), follow_redirects=False) as cli:
+            r = await cli.request(
+                request.method, target, headers=fwd_headers, content=body or None,
+            )
+    except httpx.HTTPError as e:
+        return HTMLResponse(
+            f"<h3>CAD 查看器不可达</h3><p>{type(e).__name__}: {e}</p>"
+            f"<p>目标: {target}</p>",
+            status_code=502,
+        )
+
+    out_headers = {}
+    for k, v in r.headers.items():
+        lk = k.lower()
+        if lk in ("content-encoding", "content-length", "transfer-encoding", "connection"):
+            continue
+        if lk in ("x-frame-options", "content-security-policy"):
+            continue  # 反代场景下这两个会把 iframe 拦掉
+        out_headers[k] = v
+
+    return Response(
+        content=r.content,
+        status_code=r.status_code,
+        headers=out_headers,
+        media_type=r.headers.get("content-type"),
+    )

@@ -1,0 +1,38 @@
+# =============================================================================
+# docker-compose.dev.yml —— 「复用外部 OnlyOffice / cad-viewer」的叠加文件
+#
+#   ★ 什么时候用它 ★
+#     你的 OnlyOffice（以及 cad-viewer）跑在**另一个 compose 项目**里，
+#     本编排不应该再起一份，而是让 nebula 加入它们所在的那张网络。
+#     典型场景：本机开发机 —— OO 与 CAD 由 D:\DwgViewer\deploy 那个项目提供。
+#
+#   ★ 用法 ★
+#     .env 里把 COMPOSE_PROFILES 留空（不要 bundled），然后：
+#
+#       docker compose -f deploy/docker-compose.yml \
+#                      -f deploy/docker-compose.dev.yml \
+#                      --project-directory deploy up -d
+#
+#     .env 里同时要把地址指过去（不能再用服务名 onlyoffice / cad-viewer）：
+#       NB_OO_URL=http://maple-onlyoffice
+#       NB_OO_SECRET=<与那个 OnlyOffice 容器完全一致的 JWT 密钥>
+#       NB_CAD_URL=http://maple-cad-viewer:8080
+#       NB_CAD_PROBE=http://maple-cad-viewer:8080
+#       NB_EXT_NETWORK=deploy_default
+#
+#   ★ 为什么 nebula 的 networks 要**两个都列** ★
+#     Compose 合并多份文件时，`networks`（列表）是**替换**而不是追加
+#     （只有 ports / expose / dns / tmpfs 这几类是追加）。
+#     所以这里不能只写 oonet，必须把原来的 nebula-net 一起写上。
+# =============================================================================
+
+services:
+  nebula:
+    networks:
+      - nebula-net      # 本编排自己的网络（保持原样）
+      - oonet           # 外部：OnlyOffice / cad-viewer 所在的网络
+
+networks:
+  oonet:
+    external: true
+    name: ${NB_EXT_NETWORK:-deploy_default}

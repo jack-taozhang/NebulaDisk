@@ -1,0 +1,79 @@
+# =============================================================================
+# nebula/Dockerfile 专用构建上下文排除清单
+#
+#   ★ 文件名必须是 Dockerfile.dockerignore ★
+#   Docker 只认「上下文根」的 .dockerignore；想针对某个 Dockerfile 单独排除，
+#   必须把文件命名为 <Dockerfile 名>.dockerignore 并放在该 Dockerfile 同目录。
+#   本文件原名 nebula/.dockerignore —— 名字不对，daemon 根本不读它，
+#   于是 sample/、docs/、tools/ 每次都被塞进构建上下文。改名后即生效。
+#
+#   生效范围：仅 -f nebula/Dockerfile 这次构建。
+#   上下文根 .dockerignore 负责两个构建都不需要的东西（它是超集）。
+#
+#   这里可以比根那份更激进：src/ docker/ config/ 等只服务基础镜像，
+#   nebula 镜像完全不用，全部排除。
+# =============================================================================
+
+# ---- 只服务基础镜像 kkfileview:5.0.2 的目录 ----
+src/
+docker/
+config/
+demo/
+nginx/
+
+# ---- 运行期数据（挂载进容器，绝不打包）----
+data/
+data-kk/
+sample/
+logs/
+cache/
+
+# ---- 依赖与大压缩包 ----
+node_modules/
+*.tar.gz
+*.zip
+*.7z
+*.iso
+
+# ---- nebula 自己的开发/测试产物（不进镜像）----
+nebula/.env
+nebula/.env.example
+nebula/.tmp/
+nebula/tools/
+nebula/docs/
+nebula/devserver.py
+nebula/selfcheck.py
+nebula/selfcheck.sh
+nebula/e2e-api.sh
+nebula/e2e-preview.sh
+nebula/e2e-test.sh
+nebula/ARCHITECTURE.md
+nebula/README.md
+nebula/build.sh
+nebula/docker-compose.yml
+nebula/data/
+nebula/data-kk/
+nebula/sample/
+
+# ---- 版本控制与工作区 ----
+.git/
+.gitignore
+.workbuddy/
+# 离线部署包（内含 docker save 出来的大 tar）
+dist/
+
+# ---- Python 缓存 ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+*.log

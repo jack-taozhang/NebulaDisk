@@ -1,0 +1,58 @@
+"""页面与元信息：首页、分享短链、错误页、健康检查"""
+
+from __future__ import annotations
+
+import time
+
+from fastapi import APIRouter, Request
+from fastapi.responses import HTMLResponse
+from .. import shares
+from ..config import settings
+from ..webutil import WEB_DIR
+from ..share_web import _share_unlocked, _render_share_page
+
+
+router = APIRouter()
+
+@router.get("/", response_class=HTMLResponse)
+async def index():
+    idx = WEB_DIR / "index.html"
+    if not idx.exists():
+        return HTMLResponse("<h1>NebulaDisk</h1><p>前端文件缺失</p>", status_code=500)
+    return HTMLResponse(idx.read_text(encoding="utf-8"))
+
+
+@router.get("/s/{token}", response_class=HTMLResponse)
+async def share_landing(token: str, request: Request):
+    """分享短链：/s/<token> —— 对外给的就是这个（好记、不可枚举）。"""
+    sh = shares.get(token)
+    if not sh:
+        return HTMLResponse(_render_share_error("分享不存在或已被撤销"), status_code=404)
+    if sh.expired:
+        return HTMLResponse(_render_share_error("分享已过期"), status_code=410)
+    if sh.exhausted:
+        return HTMLResponse(_render_share_error("分享访问次数已用完"), status_code=410)
+    unlocked = _share_unlocked(request, token)
+    return HTMLResponse(_render_share_page(sh, request, unlocked=unlocked))
+
+
+def _render_share_error(msg: str) -> str:
+    page = WEB_DIR / "share.html"
+    if not page.exists():
+        return f"<h1>{msg}</h1>"
+    html = page.read_text(encoding="utf-8")
+    import json as _json
+    boot = _json.dumps({"error": msg}, ensure_ascii=False)
+    return html.replace("__SHARE_BOOT__", boot)
+
+
+
+@router.get("/healthz")
+async def healthz():
+    return {
+        "ok": True,
+        "mounts": len(settings.mounts),
+        "onlyoffice": settings.oo_enabled,
+        "cad": settings.cad_enabled,
+        "time": int(time.time()),
+    }

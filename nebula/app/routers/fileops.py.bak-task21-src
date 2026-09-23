@@ -1,0 +1,151 @@
+"""文件操作：列目录 / 新建 / 改名 / 删除 / 移动 / 解压 / 上传 / 属性 / 下载"""
+
+from __future__ import annotations
+
+import mimetypes
+from pathlib import Path
+from urllib.parse import quote
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
+from .. import auth, files, shares, users
+from ..config import settings
+from ..webutil import _mount, _stream_file
+
+
+router = APIRouter()
+
+@router.get("/api/list")
+async def api_list(mount: str, path: str = "", user: dict = Depends(auth.current_user)):
+    m = _mount(user["username"], mount)
+    return files.list_dir(m, path, user["username"])
+
+
+@router.post("/api/mkdir")
+async def api_mkdir(
+    mount: str = Form(...), path: str = Form(""), name: str = Form(...),
+    user: dict = Depends(auth.current_user),
+):
+    m = _mount(user["username"], mount)
+    r = files.mkdir(m, path, name)
+    users.audit(user["username"], "mkdir", f"{mount}:{path}/{name}")
+    return r
+
+
+@router.post("/api/rename")
+async def api_rename(
+    mount: str = Form(...), path: str = Form(...), name: str = Form(...),
+    user: dict = Depends(auth.current_user),
+):
+    m = _mount(user["username"], mount)
+    r = files.rename(m, path, name)
+    users.audit(user["username"], "rename", f"{mount}:{path}", f"-> {name}")
+    # ★ 改名后旧分享路径已失效 → 清掉 ★
+    #   否则用户会看到"分享记录还在，但链接打不开"——比直接消失更困惑。
+    n = shares.revoke_under_path(user["username"], mount, path)
+    if n:
+        users.audit(user["username"], "share-invalidate", f"{mount}:{path}", f"{n} 条随改名失效")
+    return r
+
+
+@router.post("/api/delete")
+async def api_delete(
+    mount: str = Form(...), path: str = Form(...),
+    user: dict = Depends(auth.current_user),
+):
+    m = _mount(user["username"], mount)
+    files.delete(m, path)
+    # ★ 顺手失效指向它的分享 ★
+    #   否则"文件已删除，但旧分享链接还能下载"——既像 bug 又是信息泄漏。
+    #   用 revoke_under_path：删目录时它下面所有分享都要一并清掉。
+    n = shares.revoke_under_path(user["username"], mount, path)
+    if n:
+        users.audit(user["username"], "share-invalidate", f"{mount}:{path}", f"{n} 条随删除失效")
+    users.audit(user["username"], "delete", f"{mount}:{path}")
+    return {"ok": True, "sharesRevoked": n}
+
+
+@router.post("/api/move")
+async def api_move(
+    mount: str = Form(...), path: str = Form(...), target: str = Form(...),
+    move: bool = Form(True),
+    user: dict = Depends(auth.current_user),
+):
+    m = _mount(user["username"], mount)
+    r = files.copy_or_move(m, path, target, move=move)
+    users.audit(user["username"], "move" if move else "copy", f"{mount}:{path}", f"-> {target}")
+    return r
+
+
+@router.post("/api/extract")
+async def api_extract(
+    mount: str = Form(...),
+    path: str = Form(...),
+    dest: str = Form(""),
+    overwrite: bool = Form(False),
+    user: dict = Depends(auth.current_user),
+):
+    """解压压缩包。dest 为空时解到同目录的「压缩包主名」文件夹。
+
+    需求（原文）：「集成右键对压缩文件解压功能。」
+    走的是 files.extract_archive（内含 zip-slip 防护与体积上限）。
+    """
+    m = _mount(user["username"], mount)
+    r = files.extract_archive(m, path, dest_rel=(dest or None), overwrite=overwrite)
+    users.audit(user["username"], "extract", f"{mount}:{path}",
+                f"-> {r.get('dir')} ({r.get('files')} 个文件)")
+    return r
+
+
+@router.post("/api/upload")
+async def api_upload(
+    mount: str = Form(...),
+    path: str = Form(""),
+    file: UploadFile = File(...),
+    user: dict = Depends(auth.current_user),
+):
+    m = _mount(user["username"], mount)
+    size = getattr(file, "size", None) or 0
+    if size and size > settings.max_upload_mb * 1024 * 1024:
+        raise HTTPException(413, f"文件超过 {settings.max_upload_mb}MB 限制")
+
+    r = files.save_upload(m, path, file.filename or "upload.bin", file.file)
+    users.audit(user["username"], "upload", f"{mount}:{path}/{r['name']}", f"{r['size']}B")
+    return r
+
+
+@router.get("/api/stat")
+async def api_stat(mount: str, path: str, user: dict = Depends(auth.current_user)):
+    m = _mount(user["username"], mount)
+    return files.stat_of(m, path)
+
+
+# ===========================================================================
+# 取流（内部引擎用）
+# ===========================================================================
+def _stream_file(p: Path, download: bool = False, filename: str | None = None):
+    if not p.is_file():
+        raise HTTPException(404, "文件不存在")
+    mime = mimetypes.guess_type(p.name)[0] or "application/octet-stream"
+    if download:
+        mime = "application/octet-stream"
+        disp = "attachment"
+    else:
+        disp = "inline"
+    name = filename or p.name
+    headers = {
+        "Content-Disposition": f"{disp}; filename*=UTF-8''{quote(name)}",
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "private, max-age=0, no-cache",
+    }
+    return FileResponse(str(p), media_type=mime, headers=headers)
+
+
+@router.get("/api/download")
+async def api_download(
+    mount: str, path: str, inline: bool = False,
+    user: dict = Depends(auth.current_user),
+):
+    m = _mount(user["username"], mount)
+    p = files.resolve(m, path)
+    return _stream_file(p, download=not inline)

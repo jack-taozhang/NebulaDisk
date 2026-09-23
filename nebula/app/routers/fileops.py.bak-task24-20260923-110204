@@ -1,0 +1,313 @@
+"""文件操作：列目录 / 新建 / 改名 / 删除 / 移动 / 解压 / 上传 / 属性 / 下载"""
+
+from __future__ import annotations
+
+import mimetypes
+from pathlib import Path
+from urllib.parse import quote
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
+from .. import auth, files, shares, users
+from ..config import settings
+from ..webutil import _mount, _stream_file
+import os
+router = APIRouter()
+
+@router.get("/api/list")
+async def api_list(mount: str, path: str = "", user: dict = Depends(auth.current_user)):
+    m = _mount(user["username"], mount)
+    return files.list_dir(m, path, user["username"])
+
+
+@router.post("/api/mkdir")
+async def api_mkdir(
+    mount: str = Form(...), path: str = Form(""), name: str = Form(...),
+    user: dict = Depends(auth.current_user),
+):
+    m = _mount(user["username"], mount)
+    r = files.mkdir(m, path, name)
+    users.audit(user["username"], "mkdir", f"{mount}:{path}/{name}")
+    return r
+
+
+@router.post("/api/rename")
+async def api_rename(
+    mount: str = Form(...), path: str = Form(...), name: str = Form(...),
+    user: dict = Depends(auth.current_user),
+):
+    m = _mount(user["username"], mount)
+    r = files.rename(m, path, name)
+    users.audit(user["username"], "rename", f"{mount}:{path}", f"-> {name}")
+    # ★ 改名后旧分享路径已失效 → 清掉 ★
+    #   否则用户会看到"分享记录还在，但链接打不开"——比直接消失更困惑。
+    n = shares.revoke_under_path(user["username"], mount, path)
+    if n:
+        users.audit(user["username"], "share-invalidate", f"{mount}:{path}", f"{n} 条随改名失效")
+    return r
+
+
+@router.post("/api/delete")
+async def api_delete(
+    mount: str = Form(...), path: str = Form(...),
+    user: dict = Depends(auth.current_user),
+):
+    m = _mount(user["username"], mount)
+    files.delete(m, path)
+    # ★ 顺手失效指向它的分享 ★
+    #   否则"文件已删除，但旧分享链接还能下载"——既像 bug 又是信息泄漏。
+    #   用 revoke_under_path：删目录时它下面所有分享都要一并清掉。
+    n = shares.revoke_under_path(user["username"], mount, path)
+    if n:
+        users.audit(user["username"], "share-invalidate", f"{mount}:{path}", f"{n} 条随删除失效")
+    users.audit(user["username"], "delete", f"{mount}:{path}")
+    return {"ok": True, "sharesRevoked": n}
+
+
+@router.post("/api/move")
+async def api_move(
+    mount: str = Form(...), path: str = Form(...), target: str = Form(...),
+    move: bool = Form(True),
+    user: dict = Depends(auth.current_user),
+):
+    m = _mount(user["username"], mount)
+    r = files.copy_or_move(m, path, target, move=move)
+    users.audit(user["username"], "move" if move else "copy", f"{mount}:{path}", f"-> {target}")
+    return r
+
+
+@router.post("/api/extract")
+async def api_extract(
+    mount: str = Form(...),
+    path: str = Form(...),
+    dest: str = Form(""),
+    overwrite: bool = Form(False),
+    user: dict = Depends(auth.current_user),
+):
+    """解压压缩包。dest 为空时解到同目录的「压缩包主名」文件夹。
+
+    需求（原文）：「集成右键对压缩文件解压功能。」
+    走的是 files.extract_archive（内含 zip-slip 防护与体积上限）。
+    """
+    m = _mount(user["username"], mount)
+    r = files.extract_archive(m, path, dest_rel=(dest or None), overwrite=overwrite)
+    users.audit(user["username"], "extract", f"{mount}:{path}",
+                f"-> {r.get('dir')} ({r.get('files')} 个文件)")
+    return r
+
+
+@router.post("/api/upload")
+async def api_upload(
+    mount: str = Form(...),
+    path: str = Form(""),
+    file: UploadFile = File(...),
+    user: dict = Depends(auth.current_user),
+):
+    m = _mount(user["username"], mount)
+    size = getattr(file, "size", None) or 0
+    if size and size > settings.max_upload_mb * 1024 * 1024:
+        raise HTTPException(413, f"文件超过 {settings.max_upload_mb}MB 限制")
+
+    r = files.save_upload(m, path, file.filename or "upload.bin", file.file)
+    users.audit(user["username"], "upload", f"{mount}:{path}/{r['name']}", f"{r['size']}B")
+    return r
+
+
+@router.get("/api/stat")
+async def api_stat(mount: str, path: str, user: dict = Depends(auth.current_user)):
+    m = _mount(user["username"], mount)
+    return files.stat_of(m, path)
+
+
+# ===========================================================================
+# 取流（内部引擎用）
+# ===========================================================================
+def _stream_file(p: Path, download: bool = False, filename: str | None = None):
+    if not p.is_file():
+        raise HTTPException(404, "文件不存在")
+    mime = mimetypes.guess_type(p.name)[0] or "application/octet-stream"
+    if download:
+        mime = "application/octet-stream"
+        disp = "attachment"
+    else:
+        disp = "inline"
+    name = filename or p.name
+    headers = {
+        "Content-Disposition": f"{disp}; filename*=UTF-8''{quote(name)}",
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "private, max-age=0, no-cache",
+    }
+    return FileResponse(str(p), media_type=mime, headers=headers)
+
+
+@router.get("/api/download")
+async def api_download(
+    mount: str, path: str, inline: bool = False,
+    user: dict = Depends(auth.current_user),
+):
+    m = _mount(user["username"], mount)
+    p = files.resolve(m, path)
+    return _stream_file(p, download=not inline)
+
+
+# ===== NB SEARCH (task21) BEGIN =====
+# ?????????????????????????????????????????
+#
+# ???????**??**?????????????
+#   ??? applyFilter() ????????? DOM ??????????????
+#   ??????????????????????? ? ????
+#
+# ????? SQL / ???
+#   NebulaDisk ?**????**??????????????????????
+#   ???????????????????????? ?? ?"???"??
+#   ????????????
+
+_SEARCH_MAX_HITS = 500
+_SEARCH_MAX_DEPTH = 24
+_SEARCH_MAX_SCANNED = 200000
+
+
+def _search_terms(raw: str) -> list:
+    """??????????????? tree.js ? _filterTerms ????
+
+      ? ?????? / ?? / ?? ?? ??????
+      ? ?????????????
+      ? ?? "*.png" ???? * ? . ????? "png"
+    """
+    out = []
+    seen = set()
+    for part in str(raw or "").replace("|", ",").replace("\uFF0C", ",").split():
+        for seg in part.split(","):
+            t = seg.strip().lower()
+            if not t:
+                continue
+            if t.startswith("*."):
+                t = t[2:]
+            elif t.startswith("."):
+                t = t[1:]
+            if t and t not in seen:
+                seen.add(t)
+                out.append(t)
+    return out
+
+
+def _hit(name: str, ext: str, terms: list) -> bool:
+    """??????OR ??????????"?????"?????"""
+    low = name.lower()
+    e = (ext or "").lower()
+    for t in terms:
+        # ?????????????"???"???
+        #   ? "png" ??? .png???? "my.png.bak"
+        if t.isalnum() and e and t == e:
+            return True
+        if t in low:
+            return True
+    return False
+
+
+@router.get("/api/search")
+async def api_search(
+    mount: str,
+    q: str = "",
+    path: str = "",
+    limit: int = _SEARCH_MAX_HITS,
+    user: dict = Depends(auth.current_user),
+):
+    """???????????????????????????
+
+    ???
+      mount  ????
+      q      ??????/??/??????????OR?
+      path   ????????????????
+      limit  ????????? _SEARCH_MAX_HITS ?????
+
+    ???
+      { ok, mount, base, terms, hits:[entry...], scanned, depthCapped, truncated }
+
+    ? ?? ?
+      ??????? files.resolve() ?? ???"??????????"???
+      ???????????????????
+    """
+    m = _mount(user["username"], mount)
+
+    # ?????? ? ???resolve ?????????????
+    base_dir = files.resolve(m, path or "")
+    if not base_dir.is_dir():
+        raise HTTPException(400, "\u8d77\u59cb\u8def\u5f84\u4e0d\u662f\u76ee\u5f55")
+
+    terms = _search_terms(q)
+    if not terms:
+        return {
+            "ok": True, "mount": mount, "base": "", "terms": [],
+            "hits": [], "scanned": 0, "depthCapped": False, "truncated": False,
+        }
+
+    root = files._resolve_root(m)
+    cap = max(1, min(int(limit or _SEARCH_MAX_HITS), _SEARCH_MAX_HITS))
+
+    hits = []
+    scanned = 0
+    depth_capped = False
+    # ??????????? entry.path?
+    try:
+        start_rel = "/" + str(base_dir.relative_to(root)).replace("\\", "/")
+    except ValueError:
+        start_rel = "/"
+    if start_rel == "/.":
+        start_rel = "/"
+
+    # os.walk ????????? dirnames ?????????????
+    for dirpath, dirnames, filenames in os.walk(base_dir, followlinks=False):
+        rel_here = "/" + str(Path(dirpath).relative_to(root)).replace("\\", "/")
+        if rel_here == "/.":
+            rel_here = "/"
+        # ????
+        depth = 0 if rel_here == "/" else rel_here.strip("/").count("/") + 1
+        if depth >= _SEARCH_MAX_DEPTH:
+            depth_capped = True
+            dirnames[:] = []
+        # ????????? list_dir ? HIDDEN_NAMES ???
+        dirnames[:] = [d for d in dirnames if d not in files.HIDDEN_NAMES]
+
+        base_prefix = "" if rel_here == "/" else rel_here
+        names = list(dirnames) + list(filenames)
+        for nm in names:
+            if nm in files.HIDDEN_NAMES:
+                continue
+            scanned += 1
+            if scanned > _SEARCH_MAX_SCANNED:
+                depth_capped = True
+                break
+            p = Path(dirpath) / nm
+            is_dir = p.is_dir()
+            ext = "" if is_dir else files.ext_of(nm)
+            if not _hit(nm, ext, terms):
+                continue
+            e = files._entry(p, rel_here)
+            if e is None:
+                continue
+            e.path = "{}/{}".format(base_prefix, nm)
+            hits.append(e.as_dict())
+            if len(hits) >= cap:
+                break
+        if len(hits) >= cap or scanned > _SEARCH_MAX_SCANNED:
+            break
+
+    # ??????????? list_dir ??????????
+    hits.sort(key=lambda d: (not d.get("isDir"), str(d.get("name", "")).lower()))
+
+    return {
+        "ok": True,
+        "mount": mount,
+        "base": start_rel,
+        "terms": terms,
+        "hits": hits,
+        # scanned ??????"?????"?????????????
+        "scanned": scanned,
+        "depthCapped": depth_capped,
+        "truncated": len(hits) >= cap,
+    }
+
+
+# ===== NB SEARCH (task21) END =====
+

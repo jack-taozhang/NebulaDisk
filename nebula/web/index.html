@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#0067c0">
+<!-- 云盘属于私有内容，禁止搜索引擎收录 -->
+<meta name="robots" content="noindex, nofollow">
+<title>NebulaDisk</title>
+<link rel="stylesheet" href="/static/css/app.css">
+<!--
+  站点图标（favicon）
+  ★ 与 kkFileView 同风格 ★
+    kkFileView 的图标是「单一深蓝 #185290 + 透明底 + 粗斜体字母」。
+    这里沿用同一品牌色与体例，只把字母换成 N（NebulaDisk 的首字母），
+    保证两个服务在浏览器标签页里看起来是一家人。
+    svg 优先（任意缩放清晰），ico 兜底（老浏览器/收藏夹会请求 /favicon.ico）。
+-->
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<link rel="alternate icon" type="image/x-icon" href="/static/favicon.ico">
+<link rel="apple-touch-icon" href="/static/favicon.ico">
+</head>
+<body>
+
+<!-- =====================================================================
+     启动遮罩：等 /api/me 探完会话再决定进桌面还是登录页，
+     避免已登录用户看到登录页闪一下
+     ===================================================================== -->
+<div id="boot">
+  <div class="boot-inner">
+    <svg viewBox="0 0 32 32" width="64" height="64" fill="none">
+      <path d="M9 25a7 7 0 0 1 .7-13.9A8.8 8.8 0 0 1 26 13.3 6.4 6.4 0 0 1 25.3 25z"
+            fill="#fff" fill-opacity=".92"/>
+      <path d="M16 19.5V12M12.6 15.2 16 11.8l3.4 3.4" stroke="#0067c0" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    <div class="boot-name">正在启动 <span data-role="brand">NebulaDisk</span>…</div>
+    <div class="spinner" style="border-color:rgba(255,255,255,.25);border-top-color:#fff"></div>
+  </div>
+</div>
+
+
+<!-- =====================================================================
+     桌面
+     ===================================================================== -->
+<div id="desktop" style="display:none">
+  <div id="desktop-icons"></div>
+  <div id="window-layer" style="position:absolute;inset:0;pointer-events:none"></div>
+</div>
+
+<!-- 窗口层需要接收鼠标事件，但空白处要透传到桌面 -->
+<style>
+  #window-layer > .window { pointer-events: auto; }
+</style>
+
+
+<!-- =====================================================================
+     任务栏
+     ===================================================================== -->
+<div id="taskbar">
+  <!-- 左下角：显示桌面（Win 的「显示桌面」细条） -->
+  <button class="tray-btn" id="btn-showdesk" title="显示桌面"
+          style="width:8px;padding:0;opacity:.9">
+    <span style="display:block;width:3px;height:22px;border-left:1px solid var(--border-strong)"></span>
+  </button>
+
+  <div class="tb-center">
+    <!-- 开始按钮 -->
+    <button class="tb-app" id="btn-start" title="开始">
+      <svg viewBox="0 0 32 32" fill="none">
+        <path fill="currentColor" d="M16 3.2c-4.2 0-7.7 2.8-8.9 6.6A6.4 6.4 0 0 0 7.4 22.4h2.3a1.2 1.2 0 0 0 0-2.4H7.4a4 4 0 0 1-.1-8 4 4 0 0 1 .5.03l1.2.16.4-1.14A6.7 6.7 0 0 1 16 5.6c3 0 5.6 2 6.5 4.7l.35 1.06 1.1.1a4.3 4.3 0 0 1 3.9 4.3 4.3 4.3 0 0 1-1.3 3.1 1.2 1.2 0 0 0 1.7 1.7A6.7 6.7 0 0 0 30.2 15.8a6.7 6.7 0 0 0-5.6-6.6A9.2 9.2 0 0 0 16 3.2Z"/>
+        <path fill="currentColor" d="M13.1 16.3a1.2 1.2 0 0 1 1.7 0l.4.4V11a1.2 1.2 0 0 1 2.4 0v5.7l.4-.4a1.2 1.2 0 0 1 1.7 1.7l-2.6 2.6a1.2 1.2 0 0 1-1.7 0L13.1 18a1.2 1.2 0 0 1 0-1.7Z"/>
+        <path fill="currentColor" d="M11 23.2a1.2 1.2 0 0 1 1.2-1.2h7.6a1.2 1.2 0 0 1 0 2.4h-7.6A1.2 1.2 0 0 1 11 23.2Z"/>
+      </svg>
+    </button>
+
+    <!-- 已打开的窗口（由 WM 动态填充） -->
+    <div id="tb-apps" style="display:flex;align-items:center;gap:4px"></div>
+
+    <!-- 关闭全部 -->
+    <button class="tb-app" id="btn-closeall" title="关闭所有窗口">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"
+           stroke-linecap="round">
+        <path d="M3.5 3.5l9 9"/><path d="M12.5 3.5l-9 9"/>
+      </svg>
+    </button>
+  </div>
+
+  <div class="tb-tray">
+    <button class="tray-btn" id="btn-theme" title="切换主题">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"
+           stroke-linecap="round">
+        <circle cx="8" cy="8" r="3.2"/>
+        <path d="M8 1.6v1.5M8 12.9v1.5M1.6 8h1.5M12.9 8h1.5
+                 M3.5 3.5l1 1M11.5 11.5l1 1M12.5 3.5l-1 1M4.5 11.5l-1 1"/>
+      </svg>
+    </button>
+    <span style="width:1px;height:18px;background:var(--divider)"></span>
+    <div class="tray-btn" id="clock" style="cursor:default">
+      <div>
+        <span data-role="clock-time" style="font-size:12px">--:--</span>
+        <span class="ck-date" data-role="clock-date">--/--</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- =====================================================================
+     开始菜单
+     ===================================================================== -->
+<div id="start-menu">
+  <div class="start-search">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+      <circle cx="7.2" cy="7.2" r="4.6"/><path d="M10.6 10.6 14 14"/>
+    </svg>
+    <input type="text" id="start-search-input" placeholder="搜索文件或输入回车打开首个目录">
+  </div>
+
+  <!--
+    ★ 这里原本有一个写死的 <div class="start-head"><span>推荐的项目</span></div>，
+    但段标题「已固定 / 推荐的项目」现在由 renderStartGrid() 按内容动态生成
+    （见 app.js 的 seg()），两边都写就会**重复显示两行「推荐的项目」**。
+    已删除，标题统一由 JS 出。
+  -->
+
+  <!--
+    网格内容由 renderStartGrid() 动态填充，分「已固定 / 推荐的项目」两段。
+    右键任意磁贴可「固定到开始菜单 / 取消固定」（持久化到 localStorage）。
+    ★ 不要在这里写死磁贴 ★ 否则会与 JS 渲染结果重复。
+  -->
+  <div class="start-body" id="start-grid"></div>
+
+  <div class="start-foot">
+    <div class="start-user">
+      <span class="avatar" data-role="start-avatar">?</span>
+      <span class="su-name" data-role="start-username">未登录</span>
+    </div>
+    <div class="start-foot-actions">
+      <!--
+        用户管理 / 关于本机 / 退出登录
+        ★ 顺序：用户管理 → 关于本机 → 退出登录 ★
+          用户要求（原话）：「用户管理设置 放到 关于本机 按钮前面。」
+          三个都是 icon-only，文案走 title 悬停提示。
+        ★ 用户管理只在管理员登录时显示 ★
+          普通用户看不到这个按钮（app.js 里按 App.me.isAdmin 控制显隐），
+          点进去也会被后端 require_admin 挡住 —— 双保险。
+      -->
+      <button class="start-power" id="btn-users" title="用户管理" style="display:none">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"
+             stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="6" cy="5.4" r="2.5"/>
+          <path d="M1.6 13.2c0-2.3 2-3.9 4.4-3.9s4.4 1.6 4.4 3.9"/>
+          <path d="M11.2 3.3a2.5 2.5 0 0 1 0 4.6"/>
+          <path d="M12.2 9.6c1.3.5 2.2 1.6 2.2 3.1"/>
+        </svg>
+      </button>
+      <button class="start-power" id="btn-about" title="关于本机">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"
+             stroke-linecap="round">
+          <circle cx="8" cy="8" r="6.2"/>
+          <path d="M8 7.2v4.2"/>
+          <circle cx="8" cy="4.9" r=".85" fill="currentColor" stroke="none"/>
+        </svg>
+      </button>
+      <button class="start-power" id="btn-power" title="退出登录">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"
+             stroke-linecap="round">
+          <path d="M8 2.5v6"/>
+          <path d="M4.6 4.4a5 5 0 1 0 6.8 0"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+</div>
+
+
+<!-- =====================================================================
+     登录页
+     ===================================================================== -->
+<div id="login-screen" class="hide">
+  <div class="login-card">
+    <div class="login-logo">
+      <svg viewBox="0 0 32 32" fill="none">
+        <defs>
+          <linearGradient id="lg" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#4cc2ff"/>
+            <stop offset="1" stop-color="#0067c0"/>
+          </linearGradient>
+        </defs>
+        <path d="M9 25a7 7 0 0 1 .7-13.9A8.8 8.8 0 0 1 26 13.3 6.4 6.4 0 0 1 25.3 25z"
+              fill="url(#lg)"/>
+        <path d="M16 19.5V12M12.6 15.2 16 11.8l3.4 3.4" stroke="#fff" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <div class="ll-title" data-role="brand">NebulaDisk</div>
+      <div class="ll-sub">私有云盘 · 在线预览与编辑</div>
+    </div>
+
+    <form id="login-form" autocomplete="on">
+      <div class="field">
+        <label for="lg-user">用户名</label>
+        <input type="text" id="lg-user" name="username" autocomplete="username"
+               spellcheck="false" required>
+      </div>
+      <div class="field">
+        <label for="lg-pass">密码</label>
+        <input type="password" id="lg-pass" name="password" autocomplete="current-password"
+               required>
+      </div>
+
+      <div class="login-err" id="login-err"></div>
+
+      <button class="btn primary" type="submit">登录</button>
+    </form>
+
+    <div class="login-foot">
+      首次部署请查看容器日志获取初始管理员密码<br>
+      或在启动参数中设置 <code>NEBULA_ADMIN_PASSWORD</code>
+    </div>
+  </div>
+</div>
+
+
+<!-- Toast 容器 -->
+<div id="toasts"></div>
+
+
+<!-- =====================================================================
+     脚本（按依赖顺序加载，无构建步骤）
+     ===================================================================== -->
+<script src="/static/js/icons.js"></script>
+<script src="/static/js/api.js"></script>
+<script src="/static/js/shell.js"></script>
+<script src="/static/js/viewer.js"></script>
+<script src="/static/js/explorer.js"></script>
+<script src="/static/js/app.js"></script>
+
+</body>
+</html>
