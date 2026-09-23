@@ -23,3 +23,8 @@ Thumbs.db
 .env.local
 *.secret
 *.key
+
+# Python 缓存（本地跑 py_compile / import 会生成，不该入库）
+__pycache__/
+*.pyc
+*.pyo
