@@ -18,6 +18,7 @@ router = APIRouter()
 async def api_oo_config(
     request: Request,
     mount: str = Form(""), path: str = Form(""),
+    embed: str = Form(""),
     user: dict = Depends(auth.current_user),
 ):
     # ★ 参数改默认空串 + 显式校验：理由同 /api/preview（避免裸 422）★
@@ -47,6 +48,12 @@ async def api_oo_config(
     from urllib.parse import urlencode
     cb = f"{_internal_origin()}/api/oo/callback?" + urlencode({"mount": mount, "path": path})
 
+    # ★ embed=1 ⇒ 嵌入块精简版：签名**之前**隐藏顶部工具栏/侧栏（2026-09-24）★
+    #   插件嵌入块一直传 embed=1，但此前后端没有这个形参、直接忽略，
+    #   导致嵌入块里 OO 工具栏收不掉。前端改 config 会让 JWT 签名失效，
+    #   所以只能在签名前做（见 integrations.build_editor_config）。
+    want_embed = str(embed).strip().lower() in ("1", "true", "yes", "on")
+
     cfg = integrations.build_editor_config(
         file_key=integrations.file_key(mount, path, int(st.st_mtime), st.st_size),
         title=p.name,
@@ -55,6 +62,7 @@ async def api_oo_config(
         mode=mode,
         user_id=user["username"],
         user_name=user["username"],
+        embed=want_embed,
     )
 
     users.audit(user["username"], "oo_open", f"{mount}:{path}", mode)

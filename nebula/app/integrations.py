@@ -77,9 +77,60 @@ def build_editor_config(
     user_id: str,
     user_name: str,
     lang: str = "zh-CN",
+    embed: bool = False,
 ) -> dict:
-    """生成 OnlyOffice DocsAPI config 对象（含 token）。"""
+    """生成 OnlyOffice DocsAPI config 对象（含 token）。
+
+    embed=True ⇒ 嵌入块精简版：签名**之前**把 customization 换成
+    「隐藏顶部工具栏 + 左右侧栏」的配置（2026-09-24 需求）。
+    页签打开时不传 embed，保持完整工具栏。
+    """
     ext = title.rsplit(".", 1)[-1].lower() if "." in title else "docx"
+
+    customization = {
+        "autosave": True,
+        "forcesave": True,
+        "compactHeader": True,
+        "hideRightMenu": False,
+        "uiTheme": "theme-light",
+        # ---- 关掉 OnlyOffice 自带的面板（2026-09-22）----
+        # 现象：编辑器左侧多出一条窄栏（插件 / 反馈&支持），
+        #       右侧才是文档，看着像「两个画面」。
+        # 这是 OO 自己的内置面板，不是调用方的布局。
+        # 本来想在前端（思源插件）里改这两个字段，但**不行**：
+        #   下面 `cfg["token"] = _sign(cfg)` 是对**整份 config 签名**的，
+        #   前端再动任何字段都会让 token 与内容不一致 → OO 拒绝配置。
+        #   而 compose 里 JWT_ENABLED=true，token 是强校验。
+        # 所以只能在这里（签名之前）加，然后重建镜像。
+        "plugins": False,     # 左栏「插件」面板
+        "leftMenu": False,    # 左栏菜单
+        "about": False,       # 「关于」
+        "feedback": False,    # 「反馈 & 支持」
+    }
+
+    if embed:
+        # ---- 嵌入块精简 UI（2026-09-24，两轮修正）----
+        #
+        #   【第一轮教训】layout（customization.layout）是 OnlyOffice
+        #   **Developer Edition 付费功能**：社区版源码里被 canBrandingExt
+        #   双重拦截（LayoutManager._applyCustomization 的 !_licensed 短路 +
+        #   Main.js hidePreloader 里 if (canBrandingExt) 才调 applyCustomization）。
+        #   配置写得再对，社区版也直接忽略 ⇒ 用户实测「还是有工具条」。
+        #   不能改 OO 容器代码绕过 license 检查（破解付费功能）。
+        #
+        #   【正解】type="embedded"（官方内嵌查看器）：
+        #   api.js 对 type=embedded 加载 /web-apps/apps/<app>/embed —— 天生
+        #   无顶部工具栏、无左右侧栏，只有极简查看 UI。代价：**只读**，
+        #   嵌入块里不能编辑（编辑走页签，页签仍是完整编辑器）。
+        customization.update({
+            "hideRightMenu": True,
+            "layout": {
+                "toolbar": False,
+                "leftMenu": False,
+                "rightMenu": False,
+                "statusBar": False,
+            },
+        })
 
     cfg: dict = {
         "documentType": _doc_type(ext),
@@ -101,28 +152,14 @@ def build_editor_config(
             "lang": lang,
             "callbackUrl": callback_url,
             "user": {"id": user_id, "name": user_name},
-            "customization": {
-                "autosave": True,
-                "forcesave": True,
-                "compactHeader": True,
-                "hideRightMenu": False,
-                "uiTheme": "theme-light",
-                # ---- 关掉 OnlyOffice 自带的面板（2026-09-22）----
-                # 现象：编辑器左侧多出一条窄栏（插件 / 反馈&支持），
-                #       右侧才是文档，看着像「两个画面」。
-                # 这是 OO 自己的内置面板，不是调用方的布局。
-                # 本来想在前端（思源插件）里改这两个字段，但**不行**：
-                #   下面 `cfg["token"] = _sign(cfg)` 是对**整份 config 签名**的，
-                #   前端再动任何字段都会让 token 与内容不一致 → OO 拒绝配置。
-                #   而 compose 里 JWT_ENABLED=true，token 是强校验。
-                # 所以只能在这里（签名之前）加，然后重建镜像。
-                "plugins": False,     # 左栏「插件」面板
-                "leftMenu": False,    # 左栏菜单
-                "about": False,       # 「关于」
-                "feedback": False,    # 「反馈 & 支持」
-            },
+            "customization": customization,
         },
     }
+
+    if embed:
+        # type 是 config 顶层键（与 documentType 平级），必须在签名前、
+        # cfg 建好之后设置 —— 见上方 embed 分支注释（embedded=官方无工具栏查看器）。
+        cfg["type"] = "embedded"
 
     if settings.oo_secret:
         cfg["token"] = _sign(cfg)
