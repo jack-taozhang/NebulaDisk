@@ -1206,6 +1206,35 @@ function showServerSettings() {
       Toast.error('加载用户列表失败', e.message);
     }
 
+    // ★ 加载「容器内真实存在的挂载点」★
+    //   路径字段改为下拉选择，避免手填一个容器里并不存在的路径 ——
+    //   那种情况保存能成功（后端只校验非空），但点进去才报「目录不存在」。
+    let avail = [];
+    try {
+      const res = await API.availableMounts();
+      avail = (res && res.mounts) ? res.mounts : [];
+    } catch (e) {
+      Toast.error('加载可用目录失败', e.message);
+    }
+    // 编辑已有映射时，它当前的 path 可能不在可用列表里（例如该挂载已被摘掉），
+    // 仍要显示出来，否则一打开就把用户已有的配置改掉了。
+    const curPath = (m.path || '').replace(/\/+$/, '');
+    const known = new Set(avail.map(a => a.path.replace(/\/+$/, '')));
+    if (curPath && !known.has(curPath)) {
+      avail = [{ path: m.path, writable: !!m.writable, inUse: false, stale: true }, ...avail];
+    }
+
+    const optionsHtml = avail.map((a) => {
+      const p = a.path;
+      const isCur = p.replace(/\/+$/, '') === curPath;
+      const tags = [];
+      if (a.writable === false) tags.push('只读');
+      if (a.inUse && !isCur) tags.push('已映射');
+      if (a.stale) tags.push('当前值，可能已失效');
+      const suffix = tags.length ? `（${tags.join('，')}）` : '';
+      return `<option value="${esc(p)}" ${isCur ? 'selected' : ''}>${esc(p)}${suffix}</option>`;
+    }).join('');
+
     const hasAll = m.users.includes('*');
 
     const html = `
@@ -1215,7 +1244,13 @@ function showServerSettings() {
       </div>
       <div class="form-group">
         <label>路径 *</label>
-        <input type="text" name="path" value="${esc(m.path)}" placeholder="例如：/mnt/docs 或 D:\\Files">
+        <select name="path-sel" class="mount-path-sel">
+          ${optionsHtml || '<option value="">（容器内未发现可用挂载点）</option>'}
+        </select>
+        <div class="f-hint" data-role="path-hint">
+          只能选择容器内<strong>已挂载</strong>的目录；列表里没有的目录，
+          需先在 docker-compose 的 volumes 里挂载后重启容器。
+        </div>
       </div>
       <div class="form-group">
         <label>可见用户</label>
@@ -1265,6 +1300,7 @@ function showServerSettings() {
     const cancelBtn = dlg.foot.querySelector('[data-role="cancel"]');
     const allCb = dlg.el.querySelector('[name="users_all"]');
     const listEl = dlg.el.querySelector('[data-role="user-list"]');
+    const pathSel = dlg.el.querySelector('[name="path-sel"]');
 
     // 所有用户 → 切换时禁用/启用下面的列表
     allCb.addEventListener('change', () => {
@@ -1284,11 +1320,22 @@ function showServerSettings() {
 
     function submit() {
       const label = dlg.el.querySelector('[name="label"]').value;
-      const path = dlg.el.querySelector('[name="path"]').value;
+      // 路径**只能**来自下拉（已移除「手动输入」入口）——
+      // 这样就不可能出现"填了容器里并不存在的路径、保存还成功"的情况。
+      const path = pathSel.value;
       const writable = dlg.el.querySelector('[name="writable"]').checked;
 
-      if (!path.trim()) {
-        errEl.textContent = '路径不能为空';
+      if (!path || !path.trim()) {
+        errEl.textContent = '请先选择一个已挂载的目录';
+        errEl.style.display = 'block';
+        return;
+      }
+      // 防重复：同一路径不允许加两次
+      const norm = path.trim().replace(/\/+$/, '');
+      const dup = (cfg.mounts || []).some((x, i) =>
+        i !== idx && (x.path || '').replace(/\/+$/, '') === norm);
+      if (dup) {
+        errEl.textContent = '该路径已在映射列表中';
         errEl.style.display = 'block';
         return;
       }
@@ -1324,7 +1371,7 @@ function showServerSettings() {
     dlg.el.querySelectorAll('input[type="text"]').forEach((inp) => {
       inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
     });
-    setTimeout(() => dlg.el.querySelector('[name="path"]').focus(), 60);
+    setTimeout(() => pathSel.focus(), 60);
   }
 
   async function deleteMount(idx) {

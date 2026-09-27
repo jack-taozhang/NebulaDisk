@@ -157,6 +157,8 @@ const API = (() => {
     // ---- 管理员设置 ----
     getSettings:  () => get('/api/admin/settings'),
     saveSettings: (data) => post('/api/admin/settings', data),
+    // 容器内真实存在的挂载点，供「新建映射」下拉选择（列表项含 writable / inUse）
+    availableMounts: () => get('/api/admin/mounts/available'),
 
     // ---- 预览 ----
     previewUrl: (mount, path) => get('/api/preview', { mount, path }),

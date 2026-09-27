@@ -18,6 +18,111 @@ router = APIRouter(tags=["settings"])
 
 
 # ---------------------------------------------------------------------------
+# ★ 可用挂载目录（供「新建映射」下拉选择）★
+#
+# 为什么需要它（2026-09-27 实锤的踩坑根因）：
+#   mounts[].path 是**容器内路径**。只有真正被挂进容器的目录，才能被网盘当作盘暴露。
+#   原先这个字段是**手填**，而后端保存时**只校验非空、不校验存在性** ⇒
+#   填了 /mnt/d/ 之类并不存在的路径也能保存成功，界面还显示得好好的，
+#   直到用户点进去才报 `{"error":"目录不存在"}`。
+#   本接口把「容器里真实存在的挂载点」列出来，前端改为下拉选择，从源头消除该问题。
+#
+# 数据来源：/proc/mounts（容器自身的挂载表）。
+#   ⚠️ 可写性不靠 os.access 判断 —— 容器多以 root 运行，access(W_OK) 恒为真，
+#      即使该目录是以只读方式挂进来的。改为读挂载选项里的 `ro`。
+# ---------------------------------------------------------------------------
+
+# 系统挂载 + 程序自身目录，都不适合对外暴露。
+#
+# ★ 匹配规则踩了两次坑，最终定为「三段式」（2026-09-27 两轮实测）★
+#   ① 精确匹配 `/opt/kkFileView/file` —— 拦不住，因为容器里的实际挂载点带版本号；
+#   ② 「前缀 + /」即 `/opt/kkFileView/` —— **同样拦不住**！实际路径是
+#      `/opt/kkFileView-5.0.2/file`，中间的 `-5.0.2` 让
+#      `"/opt/kkFileView-5.0.2/file".startswith("/opt/kkFileView/")` 为 False。
+#      （实测：只做②时 `/opt/kkFileView-5.0.2/file`、`/log` 仍出现在候选列表里）
+#   ③ 必须再加「前缀 + -」：`/opt/kkFileView-` 才能罩住 `/opt/kkFileView-5.0.2/...`。
+#   ⇒ 判据：见下方 _is_skipped()。
+#   ⚠️ 这里刻意**不用**裸 startswith(p)（那会让 `/opt/nebula` 误伤 `/opt/nebula-old`
+#      之类的无关目录，也可能让 `/bin` 误伤 `/binfoo`）；加分隔符更精确。
+_SKIP_PREFIX = (
+    "/proc", "/sys", "/dev", "/run", "/etc", "/usr", "/bin", "/sbin",
+    "/lib", "/lib64", "/boot", "/srv", "/tmp",
+    "/var/lib/nebula",      # 网盘自身的数据目录
+    "/opt/kkFileView",      # kkFileView 的 file/ 与 log/（含带版本号的 /opt/kkFileView-x.y.z/）
+    "/opt/nebula",          # 网盘程序目录
+)
+
+
+def _is_skipped(norm: str) -> bool:
+    """norm 是否属于「不该对外暴露」的目录（三段式匹配，见上方说明）。
+
+    三段：精确 / 前缀+「/」/ 前缀+「-」。
+    最后一段是必需的 —— 容器里用版本号目录名（`/opt/kkFileView-5.0.2/...`），
+    只用前两段会漏掉它。
+    """
+    for p in _SKIP_PREFIX:
+        if norm == p or norm.startswith(p + "/") or norm.startswith(p + "-"):
+            return True
+    return False
+
+
+@router.get("/api/admin/mounts/available")
+async def api_available_mounts(user: dict = Depends(require_admin)):
+    """列出容器内可用作目录映射的挂载点（仅管理员）。
+
+    返回 mounts: [{path, writable, inUse}]
+      - path    : 可填入 mounts[].path 的容器内路径
+      - writable: 该挂载点是否可写（依据 /proc/mounts 的挂载选项，非 os.access）
+      - inUse   : 是否已被现有映射占用
+    """
+    from pathlib import Path as _Path
+
+    entries: list[dict] = []
+    seen: set[str] = set()
+
+    try:
+        with open("/proc/mounts", "r", encoding="utf-8", errors="replace") as fh:
+            lines = fh.readlines()
+    except OSError:
+        lines = []
+
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        raw = parts[1].replace("\\040", " ")          # /proc/mounts 以 \040 转义空格
+        if not raw.startswith("/"):
+            continue
+        norm = raw.rstrip("/") or "/"
+        if norm == "/" or norm in seen:
+            continue
+        if _is_skipped(norm):
+            continue
+        try:
+            if not _Path(norm).is_dir():
+                continue
+        except OSError:
+            continue
+
+        mount_opts = set(parts[3].split(","))
+        seen.add(norm)
+        entries.append({
+            # 统一带尾斜杠，与既有映射（/mnt/share 等）风格一致
+            "path": (norm + "/") if norm != "/" else "/",
+            # 只读挂载点会带 ro；这是最可靠的判据（root 跑 os.access 恒真）
+            "writable": "ro" not in mount_opts,
+        })
+
+    used = {(m.path or "").rstrip("/") for m in settings.mounts}
+    for e in entries:
+        e["inUse"] = e["path"].rstrip("/") in used
+
+    # /mnt 下的排前面（通常正是用户想暴露给网盘的盘），其余按路径排序
+    entries.sort(key=lambda x: (not x["path"].startswith("/mnt/"), x["path"]))
+    return {"mounts": entries, "count": len(entries)}
+
+
+# ---------------------------------------------------------------------------
 # 读取设置
 # ---------------------------------------------------------------------------
 

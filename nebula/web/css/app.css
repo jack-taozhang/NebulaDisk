@@ -1567,6 +1567,49 @@ button { font-family: inherit; font-size: inherit; color: inherit; }
 }
 .form-group label.checkbox input { margin: 0; }
 
+/* ★ 下拉选择框：纳入与 input 同一套视觉规范（2026-09-27 新增）
+   背景：`.form-group` 下原先只给 input/textarea 写了样式，
+   「新建映射」新加的 <select name="path-sel"> 落在 CSS 真空里 ⇒ 露出系统默认外观，
+   在高矮、边框、圆角、字号上都与相邻控件不一致，看上去像"外来控件"。
+   另：appearance:none 会去掉原生箭头 ⇒ 必须自绘一个（用 SVG data-URI，不占额外请求）。 */
+.form-group > select {
+  width: 100%; box-sizing: border-box;
+  padding: 0 30px 0 10px;              /* 右侧多留 30px 给自绘箭头 */
+  /* ★ 必须写死高度 ★
+     同组的 input 靠 `padding: 7px` + 行高凑出 **32px**；而 <select> 的
+     内容盒高度由浏览器按控件自身规则算（实测同样的 7px 内边距只有 **30px**）
+     ⇒ 两者上下并排时肉眼可见「矮一截」。写死 32px 才能对齐。 */
+  height: 32px;
+  font-size: 12.5px; font-family: inherit;
+  color: var(--text);
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  outline: none;
+  cursor: pointer;
+  appearance: none; -webkit-appearance: none;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%2394a3b8' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+}
+.form-group > select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.form-group > select:disabled {
+  background-color: var(--bg-soft);
+  color: var(--text-3);
+  cursor: not-allowed;
+}
+/* 路径下拉的取值是容器内路径 ⇒ 用等宽字体，多行对比时更容易看出层级差异 */
+.form-group > select.mount-path-sel {
+  font-family: ui-monospace, Consolas, "Courier New", monospace;
+  font-size: 12px;
+}
+/* .f-hint 里偶尔需要强调（例如"已挂载"），用 <strong> 而不是 Markdown 的 **，
+   后者在 HTML 里会原样显示成星号。 */
+.f-hint strong { color: var(--text-2); font-weight: 600; }
+
 /* 目录映射表格 */
 .mount-table-wrap {
   border: 1px solid var(--border-strong);
