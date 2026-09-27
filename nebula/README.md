@@ -282,7 +282,7 @@ curl http://127.0.0.1:8089/healthz
 JWT 都是通的；只有**正文**失败 ⇒ 一定是「OnlyOffice 服务端去 GET 文档」这一步黄了。
 所以只需查两件事：**网络能不能互通**、**地址填得对不对**。
 
-用 `dist/nebula-1.0.0/diagnose-oo.sh` 一键把证据摊开：
+用 `dist/nebula-1.2.0/diagnose-oo.sh` 一键把证据摊开：
 
 ```bash
 bash diagnose-oo.sh
@@ -317,10 +317,28 @@ OnlyOffice 解析不了 `nebula` **就是必然的**。容器名解析不出来�
    ```
    期望 `200`。
 
-### 非 Office 文件（PDF/CAD 等）预览 403
+### 非 Office 文件（PDF/CAD 等）预览时提示「预览源文件来自不受信任的站点」
 
-kkFileView 4.4+ 有 SSRF 白名单。默认已在 compose 里设为 `KK_TRUST_HOST=*`；
-若你改过，确认它允许云盘自己（容器内 `127.0.0.1`）。
+这是 kkFileView 的来源白名单（`trust.host` / `KK_TRUST_HOST`）把请求挡了。
+
+> ⚠️ **不要写 `KK_TRUST_HOST=*`**。虽然 kkFileView 4.4+ 支持 `*` 表示"允许所有主机"，
+> 但本镜像底包实际是 **kkFileView 4.1.0**，它**不支持** `*` 通配 ——
+> `*` 会被当成一个普通 host 名，白名单变成 `{"*"}`，任何真实主机名都不匹配，
+> 结果是**所有预览全部失败**（返回 `notTrustHost` 页 + `sorry.jpg`）。
+
+正确做法：列出**实际会被回拉的 host**。
+
+```ini
+# 容器内 raw 直链形如 http://nebula:8088/api/raw/... → 必须含 compose 服务名
+KK_TRUST_HOST=nebula,127.0.0.1,localhost
+```
+
+自查：
+```bash
+docker exec nebula bash -c 'printenv KK_TRUST_HOST'
+# 命中白名单时，预览页里不应出现 "sorry.jpg"、"不受信任的站点"
+docker exec nebula bash -c 'curl -s "http://127.0.0.1:8012/index" -o /dev/null -w "%{http_code}\n"'
+```
 
 ### 中文文本文件预览乱码
 

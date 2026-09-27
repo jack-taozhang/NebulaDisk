@@ -46,7 +46,8 @@ async def api_oo_config(
 
     # 回调地址里的 mount/path 是给服务端自己回填用的，用标准 urlencode
     from urllib.parse import urlencode
-    cb = f"{_internal_origin()}/api/oo/callback?" + urlencode({"mount": mount, "path": path})
+    cb_base = settings.oo_callback_url or _internal_origin()
+    cb = f"{cb_base}/api/oo/callback?" + urlencode({"mount": mount, "path": path})
 
     # ★ embed=1 ⇒ 嵌入块精简版：签名**之前**隐藏顶部工具栏/侧栏（2026-09-24）★
     #   插件嵌入块一直传 embed=1，但此前后端没有这个形参、直接忽略，

@@ -2,7 +2,7 @@
 # =============================================================================
 # NebulaDisk 镜像构建 / 部署脚本
 #
-#   ./nebula/build.sh                    # 构建 nebula:1.0.0
+#   ./nebula/build.sh                    # 构建 nebula:1.2.0
 #   ./nebula/build.sh --up               # 构建后启动
 #   ./nebula/build.sh --no-cache         # 全量重建
 #   ./nebula/build.sh --check            # 只做构建前检查，不真构建
@@ -45,7 +45,7 @@ if ROOT_W="$(cd -- "$HERE/.." 2>/dev/null && pwd -W 2>/dev/null)"; then
 fi
 [[ -n "$ROOT" ]] || ROOT="D:/Docker/kkFileView"
 
-IMAGE="nebula:1.0.0"
+IMAGE="nebula:1.2.0"
 BASE_IMAGE="kkfileview:5.0.2"
 DO_UP=0
 NO_CACHE=0
@@ -58,7 +58,7 @@ usage() {
     cat <<'EOF'
 NebulaDisk 构建脚本
 
-  ./nebula/build.sh              构建 nebula:1.0.0
+  ./nebula/build.sh              构建 nebula:1.2.0
   ./nebula/build.sh --up         构建后启动
   ./nebula/build.sh --no-cache   全量重建
   ./nebula/build.sh --check      只做构建前检查
@@ -239,13 +239,29 @@ fi
 # 冒烟测试（对运行中的容器）
 # ---------------------------------------------------------------------------
 if [[ $DO_SMOKE -eq 1 ]]; then
-    PORT="${NB_HOST_PORT:-8088}"
+    # ⚠️ nebula/deploy 的 compose 把宿主端口映射为 8089→8088（不是 8088）。
+    #    可用 NB_HOST_PORT 覆盖。
+    PORT="${NB_HOST_PORT:-8089}"
     echo
     echo "===== 冒烟测试  http://127.0.0.1:$PORT ====="
+    KK_PORT="${NB_KK_HOST_PORT:-8012}"
+    # 容器冷启时 kkFileView（Java）要 ~7s 才绑定 8012；期间探测会拿到 000。
+    # 这里先等它起来，避免误报（曾经因此一度以为部署失败）。
+    echo "等待 kkFileView 就绪（最多 60s）…"
+    for _ in $(seq 1 30); do
+        c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$KK_PORT/index" || echo 000)
+        [[ "$c" == "200" ]] && break
+        sleep 2
+    done
+
     ok=0; bad=0
+    # chk <名称> <实际> <期望...>：期望可给多个，命中任一即通过
     chk() {
-        if [[ "$2" == "$3" ]]; then echo "  [OK  ] $1 → $2"; ok=$((ok+1));
-        else echo "  [FAIL] $1 → $2（期望 $3）"; bad=$((bad+1)); fi
+        local name="$1" got="$2"; shift 2
+        for want in "$@"; do
+            if [[ "$got" == "$want" ]]; then echo "  [OK  ] $name → $got"; ok=$((ok+1)); return; fi
+        done
+        echo "  [FAIL] $name → $got（期望 $*）"; bad=$((bad+1))
     }
     code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://127.0.0.1:$PORT/" || echo 000)
     chk "云盘首页" "$code" "200"
@@ -253,8 +269,12 @@ if [[ $DO_SMOKE -eq 1 ]]; then
     chk "健康接口" "$code" "200"
     code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://127.0.0.1:$PORT/api/me" || echo 000)
     chk "未登录 /api/me" "$code" "401"
-    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://127.0.0.1:8012/" || echo 000)
-    chk "kkFileView 直连" "$code" "200"
+    # ⚠️ kkFileView 的 `/` 是**内置重定向**到 `/index`（302），裸请求 `/` 永远不是 200。
+    #    真正该断言的是 `/index` = 200；`/` 只要不是 5xx/000 就算正常。
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://127.0.0.1:$KK_PORT/index" || echo 000)
+    chk "kkFileView /index" "$code" "200"
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://127.0.0.1:$KK_PORT/" || echo 000)
+    chk "kkFileView /(重定向)" "$code" "200" "302" "301"
     echo
     echo "通过 $ok 项，失败 $bad 项"
     exit $([[ $bad -eq 0 ]] && echo 0 || echo 1)

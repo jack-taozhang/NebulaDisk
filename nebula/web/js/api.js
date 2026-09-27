@@ -125,6 +125,7 @@ const API = (() => {
 
     // ---- 操作 ----
     mkdir:  (mount, path, name) => post('/api/mkdir', { mount, path, name }),
+    createFile: (mount, path, name) => post('/api/create-file', { mount, path, name }),
     rename: (mount, path, name) => post('/api/rename', { mount, path, name }),
     remove: (mount, path) => post('/api/delete', { mount, path }),
     move:   (mount, path, target, isMove = true) =>
@@ -152,6 +153,10 @@ const API = (() => {
       post('/api/users/rename', { username, new_username: newUsername }),
     userDelete:   (username) => post('/api/users/delete', { username }),
     userAudit:    (limit = 200) => get('/api/users/audit', { limit }),
+
+    // ---- 管理员设置 ----
+    getSettings:  () => get('/api/admin/settings'),
+    saveSettings: (data) => post('/api/admin/settings', data),
 
     // ---- 预览 ----
     previewUrl: (mount, path) => get('/api/preview', { mount, path }),

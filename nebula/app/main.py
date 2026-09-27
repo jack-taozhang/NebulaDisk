@@ -54,6 +54,7 @@ from .routers import rawlink as rawlink_routes
 from .routers import share_guest as share_guest_routes
 from .routers import shares_admin as shares_admin_routes
 from .routers import users as users_routes
+from .routers import settings as settings_routes
 from .webutil import WEB_DIR
 
 app = FastAPI(title=settings.title, docs_url=None, redoc_url=None, openapi_url=None)
@@ -174,7 +175,7 @@ async def _http_exception_handler(request: Request, exc: HTTPException):
 #   通配路径（/preview/{rest:path}、/website/{rest:path}、/cad/{rest:path}）
 #   注册在哪一组里，决定了它们会不会吞掉后面的具体路径。
 # ---------------------------------------------------------------------------
-for _r in (auth_routes, users_routes, fileops_routes, rawlink_routes,
+for _r in (auth_routes, users_routes, settings_routes, fileops_routes, rawlink_routes,
            onlyoffice_routes, preview_routes, cad_routes,
            shares_admin_routes, share_guest_routes, pages_routes):
     app.include_router(_r.router)
@@ -185,3 +186,27 @@ for _r in (auth_routes, users_routes, fileops_routes, rawlink_routes,
 # ---------------------------------------------------------------------------
 if WEB_DIR.is_dir():
     app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
+
+
+# ---------------------------------------------------------------------------
+# ★ 静态资源禁止「启发式缓存」★
+#
+# 为什么要它（2026-09-27 实锤）：
+#   前端是**无构建步骤**的 SPA —— web/ 直接挂载，index.html 里引用的是
+#   **不带版本号**的 /static/js/*.js；而 StaticFiles **默认不返回
+#   Cache-Control**，浏览器于是按 Last-Modified 走「启发式缓存」。
+#   改了前端 JS 之后用户**刷新仍拿到旧文件** —— 表现为「修复没生效」/
+#   「功能时好时坏」，而服务端 curl 一切正常，极难排查。
+#   （本次修「预览窗口只能开一个」正是如此：代码/md5/容器内文件全对，
+#     用户侧照旧 —— 他浏览器一直在用缓存的旧 viewer.js。）
+#
+# no-cache ≠ 不缓存：仍可缓存，但**每次先拿 ETag 校验**，304 时复用本地副本，
+# 代价只有一次条件请求。入口页（/）同理，否则改完 HTML 也不会生效。
+# ---------------------------------------------------------------------------
+@app.middleware("http")
+async def _revalidate_static(request: Request, call_next):
+    resp = await call_next(request)
+    p = request.url.path
+    if p.startswith("/static/") or p in ("/", "/index", "/index.html"):
+        resp.headers.setdefault("Cache-Control", "no-cache")
+    return resp

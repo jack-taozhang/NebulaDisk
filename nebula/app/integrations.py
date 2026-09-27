@@ -250,11 +250,19 @@ async def check_kk_health() -> dict:
         return {"ok": False, "reason": "未配置"}
     try:
         async with httpx.AsyncClient(timeout=5.0) as cli:
-            # ★ 探活用 /actuator/health（Spring Boot 健康端点，裸请求返回 200）★
-            #   千万不要用 /onlinePreview —— 它对不带 url 参数的请求返回 **403**
-            #   （kkFileView 的信任主机校验），拿它探活会永远显示「离线」。
-            r = await cli.get(f"{base}/actuator/health")
-            return {"ok": r.status_code == 200, "status": r.status_code}
+            # ★ 候选探活端点，按顺序取第一个返回 200 的 ★
+            #   ① /actuator/health —— Spring Boot Actuator 健康端点。
+            #      ⚠️ 实测：本项目用的 kkFileView 4.1.0 的 jar 里
+            #      **完全不含 actuator**（`unzip -l` 搜 "actuate" = 0 条），
+            #      该端点恒 404 ⇒ 不能作为唯一探针。
+            #   ② /index —— 演示页，裸请求恒 200。这是 4.1.0 上**可靠**的那个。
+            #      千万不要用 /onlinePreview —— 它对不带 url 参数的请求返回 **403**
+            #      （kkFileView 的信任主机校验），拿它探活会永远显示「离线」。
+            for path in ("/actuator/health", "/index"):
+                r = await cli.get(f"{base}{path}")
+                if r.status_code == 200:
+                    return {"ok": True, "status": r.status_code, "probe": path}
+            return {"ok": False, "status": r.status_code}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "reason": str(e)[:120]}
 

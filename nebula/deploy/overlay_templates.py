@@ -45,10 +45,15 @@ def collect(overrides_dir):
 
 
 def main():
-    if len(sys.argv) != 3:
-        sys.exit("用法: overlay_templates.py <jar路径> <overrides目录>")
+    import argparse
+    parser = argparse.ArgumentParser(description="覆盖 kkFileView jar 内的模板文件")
+    parser.add_argument("jar", help="kkFileView jar 路径")
+    parser.add_argument("overrides", help="overrides 目录")
+    parser.add_argument("--ignore-missing", action="store_true",
+                        help="jar 内不存在的条目跳过而不是报错（适配不同版本）")
+    args = parser.parse_args()
 
-    jar, overrides = sys.argv[1], sys.argv[2]
+    jar, overrides = args.jar, args.overrides
     if not os.path.isfile(jar):
         sys.exit(f"找不到 jar: {jar}")
     if not os.path.isdir(overrides):
@@ -63,8 +68,19 @@ def main():
 
     missing = [dst for dst, _ in items if dst not in names]
     if missing:
-        zin.close()
-        sys.exit("jar 内不存在这些条目，拒绝静默跳过：\n  " + "\n  ".join(missing))
+        if args.ignore_missing:
+            print(f"注意：jar 内不存在以下条目，已跳过：")
+            for dst in missing:
+                print(f"  {dst}")
+            # 过滤掉不存在的
+            items = [(dst, src) for dst, src in items if dst in names]
+            if not items:
+                zin.close()
+                print("没有可覆盖的条目，直接退出。")
+                return
+        else:
+            zin.close()
+            sys.exit("jar 内不存在这些条目，拒绝静默跳过：\n  " + "\n  ".join(missing))
 
     print(f"将覆盖 {len(items)} 个模板：")
     for dst, src in items:

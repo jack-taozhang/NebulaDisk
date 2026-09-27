@@ -67,9 +67,13 @@ services:
       #   （nginx 也可以按请求注入 X-Base-Url 头来动态覆盖，见 nginx/kkfileview.conf）
       KK_BASE_URL: "${KK_BASE_URL:-default}"
 
-      # ---- 文件来源白名单（4.4.0+ 防 SSRF，必配）----
-      # 不配 = 拒绝所有外部文件；多个用英文逗号分隔，支持 *.example.com 通配
-      KK_TRUST_HOST: "${KK_TRUST_HOST:-*}"
+      # ---- 文件来源白名单（防 SSRF，必配）----
+      # ⚠️ 只用**精确 host 或 *.子域/网段**，不要指望 "*" 通配：
+      #    "允许所有主机" 是 kkFileView 4.4+ 才有的；镜像里若是 4.1.0，
+      #    "*" 会被当成一个普通 host 名 ⇒ 白名单 {"*"} ⇒ 真实 host 全不匹配
+      #    ⇒ 所有预览返回「不受信任的站点」页。列真实 host 最稳。
+      # 容器内 raw 直链走 http://<compose服务名>:8088，务必包含该服务名。
+      KK_TRUST_HOST: "${KK_TRUST_HOST:-nebula,127.0.0.1,localhost}"
       # 黑名单优先级高于白名单，建议封掉内网段
       KK_NOT_TRUST_HOST: "${KK_NOT_TRUST_HOST:-}"
 

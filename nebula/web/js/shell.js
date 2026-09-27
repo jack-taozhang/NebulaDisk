@@ -1589,7 +1589,10 @@ const WM = (() => {
    右键菜单
    ========================================================================== */
 const ContextMenu = (() => {
-  let el = null;
+  let el = null;         // 主菜单
+  let subEl = null;      // 子菜单
+  let subItems = [];     // 当前子菜单的条目
+  let closeTimer = null; // 子菜单关闭延时
 
   function ensure() {
     if (el) return el;
@@ -1597,40 +1600,78 @@ const ContextMenu = (() => {
     el.id = 'ctx-menu';
     document.body.appendChild(el);
 
+    // 子菜单元素
+    subEl = document.createElement('div');
+    subEl.id = 'ctx-submenu';
+    subEl.className = 'ctx-menu';
+    document.body.appendChild(subEl);
+
     // 点空白 / 滚动 / Esc 都关掉
     document.addEventListener('mousedown', (e) => {
       if (!el.classList.contains('open')) return;
-      if (!el.contains(e.target)) close();
+      if (el.contains(e.target) || subEl.contains(e.target)) return;
+      closeAll();
     }, true);
-    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
-    window.addEventListener('blur', close);
-    window.addEventListener('resize', close);
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeAll(); });
+    window.addEventListener('blur', closeAll);
+    window.addEventListener('resize', closeAll);
     return el;
   }
 
   /**
-   * items: [{ label, icon, accel, danger, disabled, onClick } | { sep: true }]
+   * items: [{ label, icon, accel, danger, disabled, submenu, submenuItems, onClick } | { sep: true }]
+   *   submenu: true             → 右侧显示箭头，表示有子菜单
+   *   submenuItems: [items]     → 悬停时展开的子菜单项
    */
   function show(x, y, items) {
     ensure();
+    clearSubmenuTimer();
+    closeSubmenu();
+
     el.innerHTML = items.map((it, i) => {
       if (it.sep) return '<div class="ctx-sep"></div>';
       const cls = ['ctx-item'];
       if (it.danger) cls.push('danger');
       if (it.disabled) cls.push('disabled');
+      if (it.submenu || it.submenuItems) cls.push('has-submenu');
       return `<div class="${cls.join(' ')}" data-i="${i}">
         <span style="width:15px;flex:0 0 15px;display:grid;place-items:center">${it.icon ? Icons.ui(it.icon, 15) : ''}</span>
         <span class="ci-label">${esc(it.label)}</span>
         ${it.accel ? `<span class="ci-accel">${esc(it.accel)}</span>` : ''}
+        ${(it.submenu || it.submenuItems) ? `<span class="ci-submenu">›</span>` : ''}
       </div>`;
     }).join('');
 
     el.querySelectorAll('.ctx-item').forEach((node) => {
       const it = items[+node.dataset.i];
       if (it.disabled) return;
-      node.addEventListener('click', () => {
-        close();
-        try { it.onClick && it.onClick(); }
+
+      // 有子菜单 → 悬停展开
+      if (it.submenuItems && it.submenuItems.length) {
+        node.addEventListener('mouseenter', (ev) => {
+          clearSubmenuTimer();
+          const r = node.getBoundingClientRect();
+          openSubmenu(r.right + 2, r.top - 3, it.submenuItems);
+          // 高亮当前项
+          el.querySelectorAll('.ctx-item').forEach(n => n.classList.remove('submenu-active'));
+          node.classList.add('submenu-active');
+        });
+        node.addEventListener('mouseleave', () => {
+          scheduleCloseSubmenu();
+        });
+      }
+
+      // 点击：执行动作并关闭全部（无子菜单的项，或带子菜单但用户点了）
+      node.addEventListener('click', (ev) => {
+        // 带子菜单的项点击也执行动作（如果有 onClick），同时展开子菜单
+        // 但 Windows 风格是：点击带子菜单的项只展开，不执行其他动作
+        // 这里保持：有 submenuItems 时点击不触发 onClick（因为 onClick 是用来展开子菜单的旧方式）
+        if (it.submenuItems && it.submenuItems.length) {
+          ev.stopPropagation();
+          return;
+        }
+        closeAll();
+        try { it.onClick && it.onClick(ev); }
         catch (e) { console.error('[ctx] 菜单动作失败', e); Toast.error(e.message || String(e)); }
       });
     });
@@ -1651,11 +1692,91 @@ const ContextMenu = (() => {
     el.style.transformOrigin = (x + r.width > vw - 8 ? 'right' : 'left') + ' top';
   }
 
-  function close() {
-    if (el) el.classList.remove('open');
+  /** 展开子菜单（在指定坐标右侧） */
+  function openSubmenu(x, y, items) {
+    subItems = items;
+    subEl.innerHTML = items.map((it, i) => {
+      if (it.sep) return '<div class="ctx-sep"></div>';
+      const cls = ['ctx-item'];
+      if (it.danger) cls.push('danger');
+      if (it.disabled) cls.push('disabled');
+      return `<div class="${cls.join(' ')}" data-i="${i}">
+        <span style="width:15px;flex:0 0 15px;display:grid;place-items:center">${it.icon ? Icons.ui(it.icon, 15) : ''}</span>
+        <span class="ci-label">${esc(it.label)}</span>
+        ${it.accel ? `<span class="ci-accel">${esc(it.accel)}</span>` : ''}
+      </div>`;
+    }).join('');
+
+    subEl.querySelectorAll('.ctx-item').forEach((node) => {
+      const it = items[+node.dataset.i];
+      if (it.disabled) return;
+      node.addEventListener('click', (ev) => {
+        closeAll();
+        try { it.onClick && it.onClick(ev); }
+        catch (e) { console.error('[ctx] 子菜单动作失败', e); Toast.error(e.message || String(e)); }
+      });
+    });
+
+    // 鼠标进出子菜单
+    subEl.addEventListener('mouseenter', onSubmenuEnter, { once: true });
+    subEl.addEventListener('mouseleave', onSubmenuLeave, { once: true });
+
+    // 定位：先放右边，不够就放左边
+    subEl.style.left = '-9999px';
+    subEl.style.top = '-9999px';
+    subEl.classList.add('open');
+
+    const sr = subEl.getBoundingClientRect();
+    const vw = window.innerWidth, vh = window.innerHeight;
+    let px = x, py = y;
+
+    if (px + sr.width > vw - 8) {
+      // 右边放不下 → 放左边
+      const parentR = el.getBoundingClientRect();
+      px = parentR.left - sr.width - 2;
+    }
+    if (py + sr.height > vh - 8) py = Math.max(8, vh - sr.height - 8);
+    if (py < 8) py = 8;
+
+    subEl.style.left = px + 'px';
+    subEl.style.top = py + 'px';
   }
 
-  return { show, close };
+  function onSubmenuEnter() {
+    clearSubmenuTimer();
+  }
+  function onSubmenuLeave() {
+    scheduleCloseSubmenu();
+  }
+
+  function scheduleCloseSubmenu() {
+    clearSubmenuTimer();
+    closeTimer = setTimeout(() => {
+      closeSubmenu();
+      el.querySelectorAll('.ctx-item').forEach(n => n.classList.remove('submenu-active'));
+    }, 200);
+  }
+
+  function clearSubmenuTimer() {
+    if (closeTimer) { clearTimeout(closeTimer); closeTimer = null; }
+  }
+
+  function closeSubmenu() {
+    if (subEl) subEl.classList.remove('open');
+    subItems = [];
+  }
+
+  function close() {
+    if (el) el.classList.remove('open');
+    closeSubmenu();
+  }
+
+  function closeAll() {
+    clearSubmenuTimer();
+    close();
+  }
+
+  return { show, close, closeAll };
 })();
 
 
@@ -1807,7 +1928,17 @@ const Dialog = (() => {
     mask.className = 'modal-mask';
     mask.innerHTML = `
       <div class="dialog ${opts.wide ? 'wide' : ''}">
-        ${opts.title ? `<div class="dlg-head">${esc(opts.title)}</div>` : ''}
+        ${opts.title ? `
+          <div class="dlg-head">
+            <span class="dlg-title-text">${esc(opts.title)}</span>
+            ${opts.closeable !== false ? `
+              <button class="dlg-close" data-role="close" title="关闭">
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+                  <path d="M2 2l8 8M10 2l-8 8"/>
+                </svg>
+              </button>
+            ` : ''}
+          </div>` : ''}
         <div class="dlg-body" data-role="content"></div>
         ${opts.footer === false ? '' : `<div class="dlg-foot" data-role="foot"></div>`}
       </div>`;
@@ -1819,6 +1950,8 @@ const Dialog = (() => {
       setTimeout(() => mask.remove(), 220);
     };
     mask.addEventListener('mousedown', (e) => { if (e.target === mask && opts.maskClose !== false) close(); });
+    const closeBtn = mask.querySelector('[data-role="close"]');
+    if (closeBtn) closeBtn.addEventListener('click', close);
     return {
       el: mask.querySelector('[data-role="content"]'),
       foot: mask.querySelector('[data-role="foot"]'),

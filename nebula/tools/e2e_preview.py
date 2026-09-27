@@ -17,6 +17,11 @@ NebulaDisk 真实预览链路验证（Python 版）
   python tools/e2e_preview.py
   BASE=http://127.0.0.1:8899 python tools/e2e_preview.py
 """
+# 容器内是 Python 3.8，`list[str]` / `tuple[str, int]` 这类下标泛型注解
+# 在 3.9 之前不可用（TypeError: 'type' object is not subscriptable）。
+# 这行让注解延迟求值，脚本即可在 3.8 与 3.12 上都原生运行，无需外挂补丁。
+from __future__ import annotations
+
 import os
 import sys
 
@@ -42,8 +47,13 @@ _env_files = os.environ.get("NEBULA_TEST_FILES", "")
 FILES = [f for f in _env_files.split(",") if f] if _env_files else []
 
 
-def discover_files(client) -> list[str]:
-    """从目标挂载根目录挑几个真实存在的文件用于预览测试。"""
+def discover_files(client) -> list[tuple[str, int]]:
+    """从目标挂载根目录挑几个真实存在的文件用于预览测试。
+
+    返回 (文件名, 字节数)。带上源文件体积是为了让 raw 直链断言精确：
+    源文件本身是 0 字节时，raw 直链返回 0 字节属预期行为，不是缺陷；
+    只有「源文件非空、raw 却返回空正文」才是真故障。
+    """
     r = client.get("/api/list", params={"mount": MOUNT, "path": "/"})
     if r.status_code != 200:
         return []
@@ -51,7 +61,11 @@ def discover_files(client) -> list[str]:
     for item in r.json().get("entries", []):
         if item.get("isDir"):
             continue
-        out.append(item["name"])
+        try:
+            size = int(item.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        out.append((item["name"], size))
         if len(out) >= 5:
             break
     return out
@@ -143,7 +157,12 @@ with httpx.Client(base_url=BASE, timeout=60, follow_redirects=False) as c:
         sys.exit(1)
 
     try:
-        rr = httpx.get(KK + "/", timeout=6)
+        # ★ 用 /index 而不是 / ★
+        #   kkFileView 的 `/` 是 302 重定向到 `/index`，裸请求 `/` 会拿到 302。
+        #   之前写 `/` 且没开 follow_redirects，于是每次都在这里假红
+        #   （"kkFileView :8012 在线（302）"），看起来像服务挂了，其实是测试的锅。
+        #   /index 是 kkFileView 真正的健康页，稳定返回 200。
+        rr = httpx.get(KK + "/index", timeout=6)
         (ok if rr.status_code == 200 else bad)(f"kkFileView :8012 在线（{rr.status_code}）")
         if rr.status_code != 200:
             sys.exit(1)
@@ -153,12 +172,14 @@ with httpx.Client(base_url=BASE, timeout=60, follow_redirects=False) as c:
 
     # ------------------------------------------- 拿真实文件的预览地址
     print("\n[2] 获取预览地址（真实文件）")
-    targets = FILES or discover_files(c)
+    # 显式 NEBULA_TEST_FILES 指定的文件名拿不到体积，用 -1 表示「未知」，
+    # 此时 raw 断言退回「必须非空」。
+    targets = [(n, -1) for n in FILES] if FILES else discover_files(c)
     if not targets:
         bad(f"挂载 [{MOUNT}] 根目录下没有可用于预览测试的文件")
     else:
-        info(f"本轮测试文件：{targets}")
-    for target in targets:
+        info(f"本轮测试文件：{[t[0] for t in targets]}")
+    for target, fsize in targets:
         r = c.get("/api/preview", params={"mount": MOUNT, "path": "/" + target})
         if r.status_code != 200:
             bad(f"{target} 预览接口返回 {r.status_code}: {r.text[:120]}")
@@ -181,10 +202,17 @@ with httpx.Client(base_url=BASE, timeout=60, follow_redirects=False) as c:
             rp = sp.path + (("?" + sp.query) if sp.query else "")
             try:
                 rr = httpx.get(BASE + rp, timeout=15)
-                if rr.status_code == 200 and len(rr.content) > 0:
-                    ok(f"  raw 直链免登录可读（{len(rr.content)} 字节）")
+                got = len(rr.content)
+                if rr.status_code != 200:
+                    bad(f"  raw 直链返回 {rr.status_code}，{got} 字节")
+                elif got > 0:
+                    ok(f"  raw 直链免登录可读（{got} 字节）")
+                elif fsize == 0:
+                    # 源文件本身就是空文件，raw 返回 0 字节正是正确行为。
+                    ok("  raw 直链免登录可读（0 字节 —— 源文件本身为空，符合预期）")
                 else:
-                    bad(f"  raw 直链返回 {rr.status_code}，{len(rr.content)} 字节")
+                    bad(f"  raw 直链返回 200 但正文为空"
+                        f"（源文件 {fsize} 字节，疑似缺陷）")
             except Exception as e:  # noqa: BLE001
                 bad(f"  raw 直链请求异常：{e}")
 

@@ -170,7 +170,16 @@ const Explorer = (() => {
         -->
         ${WM.Toolbar.build({
           left: [
-            WM.Toolbar.btn('new-folder', 'folderAdd', '新建文件夹'),
+            // ★ 新建下拉菜单：文件夹 + 多种文件类型 ★
+            //   用一个带下拉箭头的按钮替代原「新建文件夹」单按钮，
+            //   点击后展开 ContextMenu，列出所有可新建的类型。
+            `<div class="tbtn-dropdown" data-a="new-menu" title="新建">
+               <button class="tbtn" data-a="new-menu">
+                 ${Icons.ui('plus')}
+                 <span class="tbtn-text">新建</span>
+                 <svg class="tbtn-caret" viewBox="0 0 16 16"><path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/></svg>
+               </button>
+             </div>`,
             WM.Toolbar.btn('upload', 'upload', '上传'),
             WM.Toolbar.sep(),
             WM.Toolbar.btn('rename', 'rename', '', '', '重命名'),
@@ -512,7 +521,7 @@ const Explorer = (() => {
       const btn = e.target.closest('[data-a]');
       if (!btn || btn.disabled) return;
       const act = btn.dataset.a;
-      if (act === 'new-folder') actNewFolder(body, S);
+      if (act === 'new-menu') openNewMenu(body, S, btn);
       else if (act === 'upload') actUpload(body, S);
       else if (act === 'rename') actRename(body, S);
       else if (act === 'download') actDownload(body, S);
@@ -1192,14 +1201,20 @@ const Explorer = (() => {
     ContextMenu.show(x, y, [
       { label: '刷新', icon: 'refresh', accel: 'F5', onClick: () => load(body, S) },
       { sep: true },
-      { label: '新建文件夹', icon: 'folderAdd', onClick: () => actNewFolder(body, S) },
+      // ★ 「新建」子菜单（悬停展开，Windows 风格）★
+      {
+        label: '新建',
+        icon: 'plus',
+        submenu: true,
+        submenuItems: newMenuItems(body, S),
+      },
       { label: '上传文件', icon: 'upload', onClick: () => actUpload(body, S) },
       { sep: true },
       // ★ 在空白处右键 → 分享**当前这个文件夹**本身 ★
       //   这是"分享整个目录"最自然的入口：不用先退到上一级再去点文件夹。
       //   根目录（S.path === '/'）也允许分享 —— 那是"分享整个映射"。
       {
-        label: S.path === '/' ? `分享整个「${S.mount}」` : '分享此文件夹',
+        label: S.path === '/' ? `分享整个「${S.mount}」` : '分享整个文件夹',
         icon: 'share',
         onClick: () => actShare(body, S, {
           name: S.path === '/' ? S.mount : (S.path.split('/').filter(Boolean).pop() || S.mount),
@@ -1217,19 +1232,16 @@ const Explorer = (() => {
         label: S.infoOpen ? '隐藏详细信息' : '显示详细信息',
         icon: 'info', onClick: () => toggleInfo(body, S),
       },
-      { sep: true },
-      { label: '在浏览器中打开原链接', icon: 'external', disabled: true },
-      {
-        label: '复制当前路径', icon: 'copy',
-        onClick: async () => {
-          const p = `${S.mount}${S.path === '/' ? '' : S.path}`;
-          try {
-            await navigator.clipboard.writeText(p);
-            Toast.ok('已复制', p);
-          } catch { Toast.error('复制失败', '浏览器拒绝了剪贴板访问'); }
-        },
-      },
     ]);
+  }
+
+  /** 复制当前路径到剪贴板（功能保留，供其他地方调用） */
+  async function copyCurrentPath(body, S) {
+    const p = `${S.mount}${S.path === '/' ? '' : S.path}`;
+    try {
+      await navigator.clipboard.writeText(p);
+      Toast.ok('已复制', p);
+    } catch { Toast.error('复制失败', '浏览器拒绝了剪贴板访问'); }
   }
 
 
@@ -1254,6 +1266,88 @@ const Explorer = (() => {
       renderFiles(body, S);
     } catch (e) { Toast.error('创建失败', e.message); }
   }
+
+
+  /* ======================================================================
+     新建文件
+     ====================================================================== */
+
+  // 可新建的文件类型列表（与后端 create_file 支持的类型对应）
+  //   ext      —— 扩展名（小写，不含点）
+  //   label    —— 右键菜单/下拉菜单里显示的名称
+  //   icon     —— UI 图标名（Icons.ui 用的）
+  //   defaultName —— 默认文件名（不含扩展名，用户可修改）
+  const NEW_FILE_TYPES = [
+    { ext: 'txt',    label: '文本文档',      icon: 'text',   defaultName: '新建文本文档' },
+    { ext: 'md',     label: 'Markdown 文档', icon: 'doc',    defaultName: '新建 Markdown 文档' },
+    { ext: 'json',   label: 'JSON 文件',     icon: 'code',   defaultName: '新建 JSON 文件' },
+    { ext: 'csv',    label: 'CSV 表格',      icon: 'table',  defaultName: '新建 CSV 表格' },
+    { ext: 'xml',    label: 'XML 文件',      icon: 'code',   defaultName: '新建 XML 文件' },
+    { ext: 'html',   label: 'HTML 网页',     icon: 'code',   defaultName: '新建 HTML 网页' },
+    { sep: true },
+    { ext: 'docx',   label: 'Word 文档',     icon: 'doc',    defaultName: '新建 Word 文档' },
+    { ext: 'xlsx',   label: 'Excel 工作簿',  icon: 'table',  defaultName: '新建 Excel 工作簿' },
+    { ext: 'pptx',   label: 'PowerPoint 演示', icon: 'slide', defaultName: '新建 PowerPoint 演示' },
+  ];
+
+  /** 新建一个指定类型的文件。弹出命名对话框 → 调用 API → 刷新列表 */
+  async function actNewFile(body, S, ext) {
+    const type = NEW_FILE_TYPES.find((t) => t.ext === ext);
+    if (!type) return;
+    const defaultBase = type.defaultName || '新文件';
+    const name = await Dialog.prompt({
+      title: `新建${type.label}`,
+      value: defaultBase,
+      selectBase: true,     // 默认选中主名，用户直接打字就能覆盖
+      placeholder: '文件名称',
+      hint: `自动带 .${ext} 后缀；名称不能包含 / \\ : * ? " < > |`,
+    });
+    if (!name) return;
+    // 确保文件名带正确的扩展名（用户手动加了就不重复加）
+    let finalName = name.trim();
+    if (!finalName.toLowerCase().endsWith('.' + ext)) {
+      finalName += '.' + ext;
+    }
+    try {
+      await API.createFile(S.mount, S.path, finalName);
+      Toast.ok('已创建', finalName);
+      await load(body, S);
+      S.selected.clear();
+      S.selected.add(finalName);
+      renderFiles(body, S);
+    } catch (e) { Toast.error('创建失败', e.message); }
+  }
+
+  /** 从工具栏「新建」按钮展开菜单 */
+  function openNewMenu(body, S, btn) {
+    const r = btn.getBoundingClientRect();
+    const items = newMenuItems(body, S);
+    ContextMenu.show(r.left, r.bottom + 4, items);
+  }
+
+  /** 从右键「新建」子菜单位置展开（二级菜单在右侧） */
+  function showNewSubMenu(body, S, x, y) {
+    const items = newMenuItems(body, S);
+    ContextMenu.show(x, y, items);
+  }
+
+  /** 组装「新建」菜单的条目列表（文件夹 + 各文件类型） */
+  function newMenuItems(body, S) {
+    const items = [
+      { label: '文件夹', icon: 'folderAdd', onClick: () => actNewFolder(body, S) },
+      { sep: true },
+    ];
+    for (const t of NEW_FILE_TYPES) {
+      if (t.sep) { items.push({ sep: true }); continue; }
+      items.push({
+        label: t.label,
+        icon: t.icon,
+        onClick: () => actNewFile(body, S, t.ext),
+      });
+    }
+    return items;
+  }
+
 
   function actUpload(body, S) {
     const input = document.createElement('input');
@@ -1925,7 +2019,7 @@ const Explorer = (() => {
 
     // 只读挂载时禁用所有写操作
     if (S.mountReadonly) {
-      ['new-folder', 'upload', 'rename', 'delete'].forEach((a) => {
+      ['new-menu', 'upload', 'rename', 'delete'].forEach((a) => {
         const b = body.querySelector(`[data-a="${a}"]`);
         if (b) { b.disabled = true; b.title = '该目录为只读挂载'; }
       });

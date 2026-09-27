@@ -6,7 +6,7 @@
 #
 # 它会依次：
 #   1. 检查 docker / docker compose 可用
-#   2. 镜像不在本地时，从 nebula-1.0.0.tar 导入
+#   2. 镜像不在本地时，从 nebula-1.2.0.tar 导入
 #   3. 外部网络不存在时建一个占位（不建的话 compose up 会直接失败）
 #   4. .env 不存在时从 .env.example 复制一份
 #   5. 按 .env 建好缺失的宿主机目录（否则容器启动会报「映射路径不存在」）
@@ -19,8 +19,8 @@ set -uo pipefail
 HERE="$(cd -- "$(dirname -- "$0")" && pwd)"
 cd "$HERE" || exit 1
 
-IMAGE_TAR="nebula-1.0.0.tar"
-IMAGE="nebula:1.0.0"
+IMAGE_TAR="nebula-1.2.0.tar"
+IMAGE="nebula:1.2.0"
 FAIL=0
 
 say() { printf '\n\033[1m== %s ==\033[0m\n' "$1"; }

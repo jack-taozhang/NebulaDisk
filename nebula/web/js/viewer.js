@@ -39,6 +39,13 @@ const Viewer = (() => {
      ---------------------------------------------------------------------- */
   const ctxOf = new Map();   // winId -> { mount, dir, files:[{name,ext,route,isDir}], index }
 
+  // ★ 预览窗口序号 ★
+  //   让「同一个挂载点」可以同时开多个预览/编辑窗口：
+  //   id 末尾带上自增序号，WM.open 才不会因 id 相同而复用旧窗口
+  //   （原来的 id 是 `类型:${mount}`，不含文件路径）。
+  //   窗口内的「上一个/下一个」仍是原地换内容（WM.reopen），不受影响。
+  let viewSeq = 0;
+
   function setContext(winId, ctx) {
     if (winId && ctx) ctxOf.set(winId, ctx);
   }
@@ -357,7 +364,7 @@ const Viewer = (() => {
     //   换个文件就变成另一个 id 了，reopen 找不到窗口，只能新开一个 ——
     //   正是用户明确不要的行为。所以 id 只跟「这是哪个预览窗口」有关。
     //   一个文件夹里同时开两个图片预览会合并成一个窗口，这符合看图软件的直觉。
-    const id = `img:${mount}`;
+    const id = `img:${mount}-${++viewSeq}`;
     setContext(id, ctx);
 
     const render = (body, m2, p2, nm) => {
@@ -488,6 +495,8 @@ const Viewer = (() => {
       width: 940, height: 680, minWidth: 400, minHeight: 300,
       chromeless: true,
       render: (body) => render(body, mount, path, name),
+      // ★ 多开时 reg/ctxOf 以 winId 为 key 会随窗口数累积 ⇒ 关窗必须清理 ★
+      onClose: () => { reg.delete(id); ctxOf.delete(id); },
     });
   }
 
@@ -496,7 +505,7 @@ const Viewer = (() => {
      媒体播放器
      ---------------------------------------------------------------------- */
   function openMedia(mount, path, name, kind, ctx) {
-    const id = `media:${mount}:${kind}`;   // ★ id 不含 path，见 openImage 的说明
+    const id = `media:${mount}:${kind}-${++viewSeq}`;   // ★ id 不含 path，见 openImage 的说明
     setContext(id, ctx);
 
     const render = (body, m2, p2, nm) => {
@@ -537,6 +546,8 @@ const Viewer = (() => {
       width: kind === 'video' ? 880 : 520,
       height: kind === 'video' ? 560 : 180,
       render: (body) => render(body, mount, path, name),
+      // ★ 多开时 reg/ctxOf 以 winId 为 key 会随窗口数累积 ⇒ 关窗必须清理 ★
+      onClose: () => { reg.delete(id); ctxOf.delete(id); },
     });
   }
 
@@ -544,7 +555,7 @@ const Viewer = (() => {
      文本查看器（带行号、自动换行开关）
      ---------------------------------------------------------------------- */
   function openText(mount, path, name, ctx) {
-    const id = `text:${mount}`;   // ★ id 不含 path，见 openImage 的说明
+    const id = `text:${mount}-${++viewSeq}`;   // ★ id 不含 path，见 openImage 的说明
     setContext(id, ctx);
 
     const render = async (body, m2, p2, nm) => {
@@ -622,6 +633,8 @@ const Viewer = (() => {
       width: 900, height: 640,
       chromeless: true,
       render: (body) => render(body, mount, path, name),
+      // ★ 多开时 reg/ctxOf 以 winId 为 key 会随窗口数累积 ⇒ 关窗必须清理 ★
+      onClose: () => { reg.delete(id); ctxOf.delete(id); },
     });
   }
 
@@ -659,7 +672,7 @@ const Viewer = (() => {
        文件名不再显示（任务栏与 tooltip 里仍有，避免丢失信息）。
      ---------------------------------------------------------------------- */
   function openKK(mount, path, name, ctx) {
-    const id = `kk:${mount}`;   // ★ id 不含 path：翻页要原地换内容，见 openImage 说明
+    const id = `kk:${mount}-${++viewSeq}`;   // ★ id 不含 path：翻页要原地换内容，见 openImage 说明
     setContext(id, ctx);
 
     const render = (body, m2, p2, nm) => {
@@ -742,6 +755,8 @@ const Viewer = (() => {
       width: 1000, height: 700,
       chromeless: true,
       render: (body) => render(body, mount, path, name),
+      // ★ 多开时 reg/ctxOf 以 winId 为 key 会随窗口数累积 ⇒ 关窗必须清理 ★
+      onClose: () => { reg.delete(id); ctxOf.delete(id); },
     });
   }
 
@@ -753,7 +768,7 @@ const Viewer = (() => {
      保证两个预览器的观感完全统一。
      ---------------------------------------------------------------------- */
   function openCAD(mount, path, name, ctx) {
-    const id = `cad:${mount}`;   // ★ id 不含 path，见 openImage 的说明
+    const id = `cad:${mount}-${++viewSeq}`;   // ★ id 不含 path，见 openImage 的说明
     setContext(id, ctx);
 
     const render = (body, m2, p2, nm) => {
@@ -829,6 +844,8 @@ const Viewer = (() => {
       width: 1100, height: 740,
       chromeless: true,
       render: (body) => render(body, mount, path, name),
+      // ★ 多开时 reg/ctxOf 以 winId 为 key 会随窗口数累积 ⇒ 关窗必须清理 ★
+      onClose: () => { reg.delete(id); ctxOf.delete(id); },
     });
   }
 
@@ -865,7 +882,7 @@ const Viewer = (() => {
 
   function openOnlyOffice(mount, path, entry, siblingsOrCtx, dirPath) {
     const name = path.split('/').pop();
-    const id = `oo:${mount}`;   // ★ id 不含 path，见 openImage 的说明
+    const id = `oo:${mount}-${++viewSeq}`;   // ★ id 不含 path，见 openImage 的说明
     setContext(id, makeCtx(mount, path, siblingsOrCtx, dirPath));
 
     const render = (body, m2, p2, nm) => {
@@ -1040,6 +1057,8 @@ const Viewer = (() => {
       width: 1200, height: 780, minWidth: 640, minHeight: 420,
       chromeless: true,   // 统一无标题栏外观；按钮行见 WM.Toolbar
       render: (body) => render(body, mount, path, name),
+      // ★ 多开时 reg/ctxOf 以 winId 为 key 会随窗口数累积 ⇒ 关窗必须清理 ★
+      onClose: () => { reg.delete(id); ctxOf.delete(id); },
     });
   }
 

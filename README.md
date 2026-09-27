@@ -254,18 +254,27 @@ add_header Content-Security-Policy "frame-ancestors 'self'";
 
 ### `KK_TRUST_HOST` — 文件来源白名单（防 SSRF）
 
-4.4.0 起默认**拒绝所有外部文件**。不配白名单，预览任何远程文件都会提示「不信任的文件源」。
+**不配**白名单时，行为取决于版本；配了就是严格白名单，**不匹配即拒绝**。
 
 ```ini
-# 生产环境务必收窄到自己的文件服务器
-KK_TRUST_HOST=oss.aliyuncs.com,cdn.example.com,*.internal.example.com
+# 容器内 raw 直链形如 http://nebula:8088/api/raw/... → 必须含 compose 服务名
+KK_TRUST_HOST=nebula,127.0.0.1,localhost
+
+# 生产环境按需再加自己的文件服务器域名
+KK_TRUST_HOST=nebula,127.0.0.1,localhost,oss.aliyuncs.com,*.internal.example.com
 
 # 黑名单优先级更高，建议顺手封掉内网段
-KK_NOT_TRUST_HOST=localhost,127.0.0.1,192.168.*,10.*,172.16.*
+KK_NOT_TRUST_HOST=192.168.*,10.*,172.16.*
 ```
 
-> `.env` 里默认给的 `KK_TRUST_HOST=*` 是**匿名放行所有外部地址**，只适合联调，
-> 上线前必须换掉。
+> ⚠️ **不要写 `KK_TRUST_HOST=*`。**
+> 「`*` 表示允许所有主机」是 kkFileView **4.4+** 才有的逻辑；
+> 本项目镜像底包实际是 **kkFileView 4.1.0**，它的 `TrustHostFilter` 里没有该特判，
+> 走的是「白名单非空 ⇒ 严格包含匹配」：
+> `["*"].contains("nebula") == false` ⇒ 判为不受信任 ⇒ **所有预览全部失败**
+> （页面提示「预览源文件来自不受信任的站点」+ `sorry.jpg`，但进程健康、`/index` 返回 200，
+> 极易误判成网关或网络问题）。
+> 自查：`docker logs <容器> 2>&1 | grep -c sorry.jpg` 正常应为 0。
 
 ### `KK_BASE_URL` — 对外基地址
 
@@ -285,7 +294,7 @@ KK_BASE_URL=https://app.example.com/kkfileview   # 反代/HTTPS 场景
 | `KK_HOST_PORT` | 8012 | 宿主机端口 |
 | `KK_CONTEXT_PATH` | `/` | 应用上下文路径，挂子路径时改 |
 | `KK_BASE_URL` | `default` | 对外基地址，反代必配 |
-| `KK_TRUST_HOST` | `*` | 文件来源白名单，**上线前必须收窄** |
+| `KK_TRUST_HOST` | `nebula,127.0.0.1,localhost` | 文件来源白名单（**不要写 `*`**，见上） |
 | `KK_NOT_TRUST_HOST` | 空 | 黑名单，优先级更高 |
 | `KK_OFFICE_PREVIEW_TYPE` | `pdf` | `pdf`（推荐）或 `image` |
 | `KK_OFFICE_QUALITY` | 80 | 转换图片质量 1–100 |
@@ -481,7 +490,8 @@ Docker Hub 直连不通。daemon 的 `registry-mirrors` 已配好，确认那几
 
 ## 九、安全提醒
 
-- `KK_TRUST_HOST=*` **仅限联调**，上线前换成明确白名单；配合 `KK_NOT_TRUST_HOST` 封内网段。
+- `KK_TRUST_HOST` **不要写 `*`**（4.1.0 不支持该通配，会导致预览全挂）；列真实 host，
+  并配合 `KK_NOT_TRUST_HOST` 封内网段。
 - 删除接口默认关闭。要开就设独立强密码，且调用方必须改成 `POST /deleteFile`。
 - 5.0.2 起预览 HTML 文件默认在不可信沙箱 iframe 中渲染且禁用 JS（`kk.scriptjs=false`）。
   非必要不要打开。

@@ -2,7 +2,7 @@
 # NebulaDisk 离线部署编排（只消费镜像，不含 build）
 #
 #   与源码仓库里的 nebula/docker-compose.yml 的差异：
-#     ① 没有 build: 段 —— 本包用已导出的 nebula:1.0.0.tar，不需要源码；
+#     ① 没有 build: 段 —— 本包用已导出的 nebula:1.2.0.tar，不需要源码；
 #     ② NB_BASE_IMAGE / NB_APT_MIRROR 等构建期变量全部删掉；
 #     ③ 目录默认值改成 NAS 常见路径写法（改不改都能跑，但建议改）。
 #
@@ -23,7 +23,7 @@ services:
   # NebulaDisk —— 云盘 + kkFileView（单镜像双进程）
   # ---------------------------------------------------------------------------
   nebula:
-    image: ${NB_IMAGE:-nebula:1.0.0}
+    image: ${NB_IMAGE:-nebula:1.2.0}
 
     # ★ 只能用本地已导入的镜像，绝不联网拉取 ★
     #   群晖 Container Manager / 威联通 Container Station / 极空间 这类图形化
@@ -110,7 +110,9 @@ services:
 
       # ---------------- kkFileView 自身参数 ----------------
       JAVA_OPTS: "${NB_JAVA_OPTS:--XX:MaxRAMPercentage=45.0 -XX:+ExitOnOutOfMemoryError}"
-      KK_TRUST_HOST: "*"
+      # ★ 列真实 host，不要写 "*" ★ 4.1.0 的 TrustHostFilter 不支持 "*" 通配，
+      #   写 "*" 会导致所有预览被判"不受信任"（notTrustHost 页 + sorry.jpg）。
+      KK_TRUST_HOST: "nebula,127.0.0.1,localhost"
       KK_BASE_URL: "default"
       KK_CACHE_TYPE: "jdk"
       KK_OFFICE_PREVIEW_TYPE: "pdf"

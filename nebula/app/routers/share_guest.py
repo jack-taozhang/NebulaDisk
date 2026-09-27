@@ -149,7 +149,8 @@ async def api_share_preview(token: str, request: Request, path: str = ""):
 
     if route == "onlyoffice" and settings.oo_enabled:
         st = p.stat()
-        cb = f"{_internal_origin()}/api/s/{sh.token}/oo-callback?" + urlencode({"path": sub})
+        cb_base = settings.oo_callback_url or _internal_origin()
+        cb = f"{cb_base}/api/s/{sh.token}/oo-callback?" + urlencode({"path": sub})
         cfg = integrations.build_editor_config(
             file_key=f"share-{sh.token[:16]}-{int(st.st_mtime)}-{st.st_size}",
             title=p.name,

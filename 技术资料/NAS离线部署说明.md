@@ -14,9 +14,9 @@
 ## 1. 包内容
 
 ```
-nebula-1.0.0/
-├── nebula-1.0.0.tar         ← 镜像本体（docker save 出来的，约 1.7 GB）
-├── nebula-1.0.0.tar.sha256  ← 上面的校验值
+nebula-1.2.0/
+├── nebula-1.2.0.tar         ← 镜像本体（docker save 出来的，约 1.7 GB）
+├── nebula-1.2.0.tar.sha256  ← 上面的校验值
 ├── docker-compose.yml       ← 只有 image:，没有 build:；带 pull_policy: never
 ├── .env.example             ← 配置模板
 ├── install.sh               ← 一键安装（校验+导入镜像 + 建网络 + 建目录 + 启动）
@@ -26,7 +26,7 @@ nebula-1.0.0/
 **拷完先校验完整性**（1.7GB 传输损坏很隐蔽，`install.sh` 也会自动校验一遍）：
 
 ```bash
-sha256sum -c nebula-1.0.0.tar.sha256
+sha256sum -c nebula-1.2.0.tar.sha256
 ```
 
 ---
@@ -35,13 +35,13 @@ sha256sum -c nebula-1.0.0.tar.sha256
 
 ### 2.1 拷过去
 
-把整个 `nebula-1.0.0/` 目录放到 NAS 上任意位置，例如
-群晖的 `/volume1/docker/nebula-1.0.0/`。
+把整个 `nebula-1.2.0/` 目录放到 NAS 上任意位置，例如
+群晖的 `/volume1/docker/nebula-1.2.0/`。
 
 ### 2.2 改配置
 
 ```bash
-cd /volume1/docker/nebula-1.0.0
+cd /volume1/docker/nebula-1.2.0
 cp .env.example .env
 vi .env
 ```
@@ -79,7 +79,7 @@ bash install.sh
 也可以手动三步：
 
 ```bash
-docker load -i nebula-1.0.0.tar
+docker load -i nebula-1.2.0.tar
 docker network create nebula-oo        # 没有 OnlyOffice 时才需要这步，见 §4
 docker compose up -d
 ```

@@ -3,7 +3,7 @@
 #
 # 本仓库有两个构建，**上下文都是项目根**：
 #   A) 根 Dockerfile        → 基础镜像 kkfileview:5.0.2（需要 src/ 与 docker/）
-#   B) nebula/Dockerfile    → 应用镜像 nebula:1.0.0（需要 nebula/app|web|deploy|
+#   B) nebula/Dockerfile    → 应用镜像 nebula:1.2.0（需要 nebula/app|web|deploy|
 #                             overrides|requirements.txt）
 # 因此本文件只能排除「A、B 都不需要」的东西；只对 B 多余、但 A 需要的东西
 # （例如 src/、docker/）必须留在上下文里，它们由 nebula/Dockerfile.dockerignore

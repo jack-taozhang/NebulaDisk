@@ -31,6 +31,24 @@ async def api_mkdir(
     return r
 
 
+@router.post("/api/create-file")
+async def api_create_file(
+    mount: str = Form(...), path: str = Form(""), name: str = Form(...),
+    user: dict = Depends(auth.current_user),
+):
+    """新建一个空文件。根据扩展名自动生成对应格式的初始内容。
+
+    支持类型：
+      - 文本类：txt / md / json / csv / xml / html / css / js / py / ...
+      - Office 类：docx / xlsx / pptx（生成最小可用的 OOXML 文件）
+      - 其他：空文件
+    """
+    m = _mount(user["username"], mount)
+    r = files.create_file(m, path, name)
+    users.audit(user["username"], "create-file", f"{mount}:{path}/{name}")
+    return r
+
+
 @router.post("/api/rename")
 async def api_rename(
     mount: str = Form(...), path: str = Form(...), name: str = Form(...),
@@ -70,10 +88,55 @@ async def api_move(
     move: bool = Form(True),
     user: dict = Depends(auth.current_user),
 ):
+    """移动 / 复制。move=False 时为复制。
+
+    ★ 移动后必须失效旧路径下的分享（2026-09-24 补）★
+      原先 rename/delete 都调了 shares.revoke_under_path，唯独 move 漏了：
+        · rename → 已清
+        · delete → 已清
+        · move   → **没清**  ← 就是这里
+      结果「文件被移动后，旧分享链接仍能下载到它」，与另外两条行为不一致，
+      而且是信息泄漏（用户以为改名/挪走就断了，实际没断）。
+
+    ★ 为什么只对 move 清、copy 不清 ★
+      · move：旧路径**不再指向该文件** ⇒ 旧分享是"死链指向新位置"，
+        必须清（与 rename 同理）。
+      · copy：源文件**还在原处** ⇒ 旧分享依然指向那个真实存在的文件，
+        语义完全成立，**不能清**。清了反而是 bug（用户复制一份，
+        原文件的分享却失效了）。
+
+    ★ 要清两个位置 ★
+      ① 源路径 path（及它下面的子路径）—— 移动前的分享
+      ② 目标路径 target/name（及它下面的子路径）—— 该位置**历史上**可能
+         分享过别的文件，现在被新文件顶替，旧分享会指到"同名的另一个文件"上。
+      ①好理解；②容易被漏，但同样是泄漏：
+        `/a/报告.pdf` 分享过 → 删掉 → 把 `/b/x.pdf` 移进 `/a/` 并改名成
+        `报告.pdf` → 旧 token 会直接下载到这份**新文件**。
+    """
     m = _mount(user["username"], mount)
     r = files.copy_or_move(m, path, target, move=move)
-    users.audit(user["username"], "move" if move else "copy", f"{mount}:{path}", f"-> {target}")
-    return r
+    op = "move" if move else "copy"
+    users.audit(user["username"], op, f"{mount}:{path}", f"-> {target}")
+
+    if not move:
+        # 复制：源文件仍在，旧分享依然有效语义 ⇒ 不动分享
+        return r
+
+    n_src = shares.revoke_under_path(user["username"], mount, path)
+    if n_src:
+        users.audit(user["username"], "share-invalidate", f"{mount}:{path}",
+                    f"{n_src} 条随移动失效（源路径）")
+
+    # 目标位置：用「移动后的新路径」精确到这一项，连带清它下面的子路径
+    name = r.get("name") or ""
+    if name:
+        new_rel = "/".join(p for p in ((target or "").strip("/"), name) if p)
+        n_dst = shares.revoke_under_path(user["username"], mount, new_rel)
+        if n_dst:
+            users.audit(user["username"], "share-invalidate", f"{mount}:{new_rel}",
+                        f"{n_dst} 条随移动失效（目标位置被顶替）")
+
+    return {**r, "sharesRevoked": n_src + n_dst}
 
 
 @router.post("/api/extract")

@@ -6,3 +6,4 @@ uvicorn[standard]>=0.30,<1.0
 python-multipart>=0.0.9          # FastAPI 的 Form/File 解析必需
 httpx>=0.27,<1.0                 # 反代 kkFileView + 下载 OnlyOffice 产物
 bcrypt>=4.1,<5.0                 # 密码哈希（纯轮子，不需要编译）
+eval_type_backport>=0.2          # Python 3.8/3.9 兼容新类型注解语法（str | None）
