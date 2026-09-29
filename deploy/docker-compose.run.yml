@@ -76,7 +76,7 @@ services:
   # 云盘 + kkFileView（同一镜像里的两个进程，supervisord 编排）
   # ===========================================================================
   nebula:
-    image: nebula:${NB_VERSION:-1.2.0}
+    image: nebula:${NB_VERSION:-1.2.1}
     pull_policy: never          # 只用本地已导入的镜像
     <<: *common
     # 容器名必须与 NEBULA_BASE_URL 里的主机名一致（http://nebula:8088）

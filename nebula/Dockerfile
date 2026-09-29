@@ -18,7 +18,7 @@
 #   因此本容器必须和 OnlyOffice 在**同一个 docker 网络**上。
 #
 # 构建（项目根目录）：
-#   docker build --network=host -f nebula/Dockerfile -t nebula:1.2.0 .
+#   docker build --network=host -f nebula/Dockerfile -t nebula:1.2.1 .
 #
 # ⚠️ 构建上下文必须是仓库根目录（不是 nebula/），因为基础镜像 kkfileview:5.0.2
 #    需要在本地存在；若用 nebula/ 作上下文，COPY 路径也得跟着改。
@@ -35,7 +35,7 @@ ARG APT_MIRROR=mirrors.aliyun.com
 # （索引请求直接失败，不是版本不匹配）。与上面 apt、以及基础镜像里的 Maven 同样处理。
 # 实测 mirrors.aliyun.com/pypi/simple/uvicorn/ 返回 200 且含 uvicorn-0.39.0。
 ARG PIP_MIRROR=https://mirrors.aliyun.com/pypi/simple/
-ARG NEBULA_VERSION=1.2.0
+ARG NEBULA_VERSION=1.2.1
 
 LABEL org.opencontainers.image.title="NebulaDisk" \
       org.opencontainers.image.description="仿 Windows 云盘 + kkFileView 预览（单镜像双进程）" \
