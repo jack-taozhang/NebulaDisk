@@ -110,6 +110,16 @@
 
 * { box-sizing: border-box; }
 
+/* ★ `hidden` 属性必须真的隐藏（防御性，与 share.css 同源）★
+   `[hidden] { display: none }` 只存在于 **UA 样式表**，任何作者样式里的
+   `display:` 都会把它盖掉（作者 > UA，不看特异性）——
+   share.css 的 `.sh-viewer{display:flex}` 就因此让"默认隐藏的预览浮层"
+   永远显示，把整个分享落地页盖成一片空白（2026-09-30 实测事故）。
+   本文件当前没有「带 display 又靠 hidden 切换」的元素（`.btn` 没设 display，
+   所以 `#qclear.hidden` 这类是好的），但补上这条可以**对将来免疫**：
+   只要元素带了 hidden 就一定不显示，不再依赖"那个 class 恰好没写 display"。 */
+[hidden] { display: none !important; }
+
 html, body {
   margin: 0; padding: 0; height: 100%; overflow: hidden;
   font-family: "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI",

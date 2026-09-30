@@ -22,11 +22,15 @@
 #     ★ 关键是 **Git Bash 容忍 CRLF、Linux 不容忍** ★
 #     ⇒ 本地怎么测都是绿的，一推到 NAS 才炸。必须显式检查。
 #
-# 三步：
+# 四步：
 #   1) nebula/app/ 名字解析（期望 0 处）
 #   2) 换行符（nebula/ + deploy/ + 根级脚本，期望 0 个 CRLF；src/ 是上游，不扫）
 #   3) ★ 两套护栏的自检 ★ —— 拿夹具跑一遍，必须**恰好**报出预期数量。
 #      护栏自己没被验证过 = 没有护栏。
+#   4) ★ hidden 属性闸门 ★ —— 用了 `hidden` 的页面，其样式表必须钉死
+#      `[hidden] { display: none !important }`。理由见 check_hidden_css.py 的 docstring
+#      （2026-09-30：`.sh-viewer{display:flex}` 盖掉 UA 的 hidden，
+#        分享落地页被空白浮层糊住，而接口/DOM 全是好的）。
 # =============================================================================
 set -uo pipefail
 
@@ -37,6 +41,7 @@ FIX="$HERE/_undef_fixtures"
 EOLFIX="$HERE/_eol_fixtures"
 CHECK="$HERE/check_undefined.py"
 EOL="$HERE/check_eol.py"
+HID="$HERE/check_hidden_css.py"
 
 # ★★ MSYS 路径必须转给原生 Windows 程序 ★★
 #   `/d/Docker/...` 会被 Windows Python 解析成 `D:\d\Docker\...`（盘符 + 字面 d）
@@ -65,7 +70,7 @@ FAIL=0
 
 # ---------------------------------------------------------------------------
 echo
-echo "════════ 1/3 后端名字解析（nebula/app/）════════"
+echo "════════ 1/4 后端名字解析（nebula/app/）════════"
 if "$PY" "$(winpath "$CHECK")" "$(winpath "$APP")"; then
   echo "  ✅ 通过"
 else
@@ -75,7 +80,7 @@ fi
 
 # ---------------------------------------------------------------------------
 echo
-echo "════════ 2/3 换行符（nebula/ deploy/ 根级脚本；src/ 是上游不扫）════════"
+echo "════════ 2/4 换行符（nebula/ deploy/ 根级脚本；src/ 是上游不扫）════════"
 # ★ 必须在 $ROOT 下用「相对路径 + .」调用 ★
 #   check_eol.py 对「当前目录」这个扫描根只挑根级文件名白名单（build.sh、
 #   Dockerfile、.dockerignore…）；传绝对路径会被当成普通目录整棵递归，
@@ -94,7 +99,7 @@ fi
 
 # ---------------------------------------------------------------------------
 echo
-echo "════════ 3/3 护栏自检 ════════"
+echo "════════ 3/4 护栏自检 ════════"
 
 echo "  ── 3a 名字解析护栏（_undef_fixtures/）──"
 FIXOUT="$("$PY" "$(winpath "$CHECK")" "$(winpath "$FIX")" 2>&1)"
@@ -148,6 +153,33 @@ if printf '%s\n' "$EOLOUT" | grep -q 'README.md'; then
   FAIL=1
 else
   echo "    ✅ 夹具里的 LF 文件（README.md）无误报"
+fi
+
+# ---------------------------------------------------------------------------
+echo
+echo "════════ 4/4 hidden 属性闸门（含自检）════════"
+# ★ 2026-09-30 事故：`[hidden]{display:none}` 只在 UA 样式表里，
+#   作者样式任何一个 `display:` 都能把它盖掉（作者 > UA，不看特异性）⇒
+#   分享落地页的 `.sh-viewer{display:flex}` 让"默认隐藏的预览浮层"永远显示，
+#   整页被一块空白面板盖住，`hidden = true/false` 完全失效。
+#   这类「DOM 对、渲染错」的坑必须在静态层兜住 —— 靠测接口是测不出来的。
+echo "  ── 4a 闸门自检（临时夹具）──"
+HIDSELF="$("$PY" "$(winpath "$HID")" --selftest 2>&1)"
+printf '%s\n' "$HIDSELF" | sed 's/^/  /'
+if printf '%s\n' "$HIDSELF" | grep -q '✅ 自检通过'; then :; else
+  echo "    ❌ 闸门自检未通过 —— 未自检的护栏等于没有护栏"
+  FAIL=1
+fi
+echo "  ── 4b 扫 web/ ──"
+HIDOUT="$("$PY" "$(winpath "$HID")" 2>&1)"
+HIDRC=$?
+printf '%s\n' "$HIDOUT" | sed 's/^/  /'
+if [ "$HIDRC" = "0" ]; then
+  echo "    ✅ 通过"
+else
+  echo "    ❌ 有页面用了 hidden 属性、但它的样式表没钉死 [hidden]"
+  echo "       修法：在该 CSS 顶部加 `[hidden] { display: none !important; }`"
+  FAIL=1
 fi
 
 # ---------------------------------------------------------------------------

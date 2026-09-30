@@ -49,6 +49,24 @@
 
 * { box-sizing: border-box; }
 
+/* ★★★ `hidden` 属性必须真的隐藏（2026-09-30 修，实测事故）★★★
+   浏览器给 `[hidden]` 的 `display: none` 来自 **UA 样式表**，
+   而任何**作者样式**里的 `display:` 声明都会把它盖掉（作者 > UA，不看特异性）。
+   本文件里 `.sh-viewer` 就是 `display: flex`：
+
+       <div class="sh-viewer" id="sh-viewer" hidden>   ← 想让它默认不显示
+       .sh-viewer { display: flex; ... }               ← 把它又显示了出来
+
+   后果：分享落地页**一打开就被预览浮层盖住** ——
+   一整屏半透明黑 + 一块空白的白色面板，什么都看不到；
+   JS 里 `viewer.hidden = true/false` 完全失效（属性变了、渲染没变），
+   于是连"点关闭"也没用。用户报障就是这张图。
+   ⇒ 用 `!important` 把 `[hidden]` 钉死。这一条同时对**将来**新增的
+     `display:` 规则免疫 —— 只要元素带了 hidden 就一定不显示。
+   ⚠️ 不要把这条只写在 `.sh-viewer` 上：那是"修一个漏一个"，
+      凡是走 hidden 切换的元素（#sh-up / #sh-dl / #sh-toast …）都要受它保护。 */
+[hidden] { display: none !important; }
+
 html, body {
   margin: 0;
   min-height: 100%;

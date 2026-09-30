@@ -24,7 +24,7 @@ services:
   # NebulaDisk —— 云盘 + kkFileView（单镜像双进程）
   # ---------------------------------------------------------------------------
   nebula:
-    image: ${NB_IMAGE:-nebula:1.2.3}
+    image: ${NB_IMAGE:-nebula:1.2.4}
     build:
       context: ..                        # 仓库根目录（需能访问 nebula/ 与基础镜像）
       dockerfile: nebula/Dockerfile
@@ -34,7 +34,7 @@ services:
       args:
         KK_BASE_IMAGE: ${NB_BASE_IMAGE:-kkfileview:5.0.2}
         APT_MIRROR: ${NB_APT_MIRROR:-mirrors.aliyun.com}
-        NEBULA_VERSION: ${NB_VERSION:-1.2.3}
+        NEBULA_VERSION: ${NB_VERSION:-1.2.4}
 
     container_name: nebula
     restart: unless-stopped
