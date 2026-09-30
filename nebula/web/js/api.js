@@ -182,6 +182,26 @@ const API = (() => {
       return post('/api/shares/update', f);
     },
 
+    // ---- 统一「链接」（直链 /f/ + 分享 /s/ 同一张表、同一套管理接口）----
+    //   ★ 为什么是「统一」★
+    //     用户报障原话：「网盘里面自带的分享也纳入一起，采用短链的方式分享。
+    //     管理纳入一起。」⇒ 后端把两者并成一张 links 表（kind=file|share），
+    //     管理面只留 /api/links 这一组。下面 shares() 那几个入口**仍然可用**
+    //     （后端保留成兼容壳），但新代码一律走这一组。
+    links:        (all = false) => get('/api/links', all ? { all: 1 } : {}),
+    linkRevoke:   (token) => post('/api/links/revoke', { token }),
+    linkRevokeDead: () => post('/api/links/revoke-dead'),
+    linkUpdate:   (token, { note, ttlDays, maxVisits, password } = {}) => {
+      const f = { token };
+      if (note !== undefined) f.note = note;
+      if (ttlDays !== undefined) f.ttl_days = ttlDays;
+      if (maxVisits !== undefined) f.max_visits = maxVisits;
+      if (password !== undefined) f.password = password;
+      return post('/api/links/update', f);
+    },
+    //   直链签发：同一文件幂等复用同一个 12 字符 token，返回 { token, url, name }
+    shortlink:    (mount, path, name = '') => post('/api/shortlink', { mount, path, name }),
+
     // ---- 下载（用 <a download> 触发，浏览器自己带 cookie） ----
     downloadUrl: (mount, path, inline = false) => {
       const q = new URLSearchParams({ mount, path });

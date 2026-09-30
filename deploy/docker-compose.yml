@@ -86,7 +86,7 @@ services:
   # NebulaDisk —— 云盘 + kkFileView（单镜像双进程）
   # ---------------------------------------------------------------------------
   nebula:
-    image: nebula:1.2.1
+    image: nebula:1.2.2
     pull_policy: never          # 只用本地已导入的镜像，绝不联网拉取
     container_name: nebula
     restart: unless-stopped

@@ -48,9 +48,13 @@ winpath() {
 }
 
 # 找一个能用的 python
+# ★ 不要写死用户名 ★ 曾经的候选里带着 `C:/Users/HP/...`（另一台机器的托管 venv），
+#   换机后必然落空 ⇒ 静默退回系统 python（可能连 fastapi 都没装）。
+#   改成用 $USERPROFILE 现算，再兜底系统 python。
 PY=""
 for c in \
-  "C:/Users/HP/.workbuddy/binaries/python/envs/default/Scripts/python.exe" \
+  "${USERPROFILE:-$HOME}/.workbuddy/binaries/python/envs/default/Scripts/python.exe" \
+  "${USERPROFILE:-$HOME}/.workbuddy/binaries/python/envs/default/bin/python" \
   "python3" "python" ; do
   if command -v "$c" >/dev/null 2>&1; then PY="$c"; break; fi
   [ -x "$c" ] && { PY="$c"; break; }

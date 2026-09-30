@@ -18,7 +18,7 @@
 #   因此本容器必须和 OnlyOffice 在**同一个 docker 网络**上。
 #
 # 构建（项目根目录）：
-#   docker build --network=host -f nebula/Dockerfile -t nebula:1.2.1 .
+#   docker build --network=host -f nebula/Dockerfile -t nebula:1.2.2 .
 #
 # ⚠️ 构建上下文必须是仓库根目录（不是 nebula/），因为基础镜像 kkfileview:5.0.2
 #    需要在本地存在；若用 nebula/ 作上下文，COPY 路径也得跟着改。
@@ -35,11 +35,14 @@ ARG APT_MIRROR=mirrors.aliyun.com
 # （索引请求直接失败，不是版本不匹配）。与上面 apt、以及基础镜像里的 Maven 同样处理。
 # 实测 mirrors.aliyun.com/pypi/simple/uvicorn/ 返回 200 且含 uvicorn-0.39.0。
 ARG PIP_MIRROR=https://mirrors.aliyun.com/pypi/simple/
-ARG NEBULA_VERSION=1.2.1
 
-LABEL org.opencontainers.image.title="NebulaDisk" \
-      org.opencontainers.image.description="仿 Windows 云盘 + kkFileView 预览（单镜像双进程）" \
-      org.opencontainers.image.version="${NEBULA_VERSION}"
+# ★ `ARG NEBULA_VERSION` + `LABEL …version=` **刻意不放在这里** ★
+#   它们原先就写在这个位置（紧挨着下面第一个大 RUN）。
+#   Docker 的缓存规则是「ARG 的值变了 ⇒ 它**第一次被使用**的那条指令 cache miss，
+#   之后所有后继指令一律 cache miss」——LABEL 就是第一次使用 ⇒
+#   **每次只改版本号都会把下游全部 RUN（apt/pip/kkFileView）整段重跑**，
+#   一次 5~10 分钟，而实际改的只是镜像上那一个字符串。
+#   ⇒ 已挪到文件**末尾**（EXPOSE 之后，见文末「6. 版本标签」）。
 
 # -----------------------------------------------------------------------------
 # 1. Python 运行时 + supervisord
@@ -224,6 +227,22 @@ ENV KK_TRUST_HOST="nebula,127.0.0.1,localhost" \
 # 需要临时覆盖时，在 compose 的 environment 里写同名变量即可（env 优先于镜像 ENV）。
 
 EXPOSE 8012 8088
+
+# -----------------------------------------------------------------------------
+# 6. 版本标签
+#
+# ★ 为什么放在最末尾 ★
+#   ARG 一旦改了值，它**第一次被使用**的那条指令（这里的 LABEL）就 cache miss，
+#   而 LABEL 之后的**所有**指令也全部 miss。放在文件头部 ⇒ 改版本号 = 全量重建
+#   （apt + pip + kkFileView 全套，5~10 分钟）。
+#   放在末尾 ⇒ 只多一个空的元数据层，构建 1 秒内完成。
+#   ⚠️ 以后加新指令请加在 **它上面**，别往它后面追加 RUN/COPY。
+# -----------------------------------------------------------------------------
+ARG NEBULA_VERSION=1.2.2
+
+LABEL org.opencontainers.image.title="NebulaDisk" \
+      org.opencontainers.image.description="仿 Windows 云盘 + kkFileView 预览（单镜像双进程）" \
+      org.opencontainers.image.version="${NEBULA_VERSION}"
 
 # -----------------------------------------------------------------------------
 # 5. 启动

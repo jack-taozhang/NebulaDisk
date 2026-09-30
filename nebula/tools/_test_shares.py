@@ -86,8 +86,11 @@ def main() -> int:
         ok(r.status_code == 200, "创建文件分享成功", r.text[:200])
         sh = (r.json().get("share") or {})
         tok = sh.get("token")
-        ok(bool(tok) and len(tok) >= 24, "token 足够长（不可枚举）", f"len={len(tok or '')}")
+        ok(bool(tok) and len(tok) == 12, "token 是 12 字符（与短链同规格，地址更短）",
+           f"len={len(tok or '')}")
         ok(bool(sh.get("url")) and tok in (sh.get("url") or ""), "返回了完整链接")
+        ok(sh.get("url", "").startswith("/s/") or "/s/" in sh.get("url", ""),
+           "分享链接走 /s/<token>", sh.get("url"))
         ok(not sh.get("hasPassword"), "无密码分享 hasPassword=False")
         ok("password" not in sh, "响应里没有 password 字段（不泄漏）")
 

@@ -1952,3 +1952,19 @@ button { font-family: inherit; font-size: inherit; color: inherit; }
 .share-item-btns { display: flex; gap: 6px; flex: 0 0 auto; }
 /* 列表里的按钮要更紧凑（对话框本身不大） */
 .share-item-btns .btn { height: 28px; padding: 0 11px; font-size: 12px; }
+
+/* ---- 链接类型徽章：直链 /f/  vs  分享 /s/ ---- */
+/*   一个列表里混着两类链接，靠这一枚小标签区分，比在副标题里写"直链"更醒目。 */
+.share-kind {
+  display: inline-block; vertical-align: 1px;
+  margin-right: 6px; padding: 0 6px;
+  height: 16px; line-height: 15px;
+  font-size: 10.5px; font-weight: 600;
+  border-radius: 3px;
+  border: 1px solid var(--border-strong);
+  color: var(--text-2);
+  background: var(--bg-hover);
+}
+.share-kind.kind-file { color: var(--accent); border-color: var(--accent); }
+.share-kind.kind-share { color: var(--ok); border-color: var(--ok); }
+

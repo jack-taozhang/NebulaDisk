@@ -410,6 +410,12 @@ required = [
     "/api/s/{token}/unlock", "/api/s/{token}/preview",
     "/api/s/{token}/sraw/{filename}", "/api/s/{token}/oo-callback",
     "/s/{token}",
+    # ★ 统一链接（2026-09-30）★
+    #   短链 /f/{token} 与分享 /s/{token} 并成一张 links 表，管理面只留这一组。
+    #   完整链路见 tools/_test_links.py。
+    "/f/{token}", "/api/shortlink", "/api/shortlink/revoke",
+    "/api/links", "/api/links/revoke", "/api/links/update",
+    "/api/links/revoke-dead",
 ]
 missing = [p for p in required if p not in paths]
 check(f"路由齐全（{len(required)} 条）", not missing, f"缺失: {missing}")
@@ -442,18 +448,26 @@ except ImportError:
     print("  [SKIP] TestClient 不可用（缺 httpx）")
 
 # ---------------------------------------------------------------------------
-print("\n[9] 分享（安全边界）")
+print("\n[9] 分享 / 统一链接（安全边界）")
 # 需求（原文）：「增加文件分享的功能。」
+#              「网盘里面自带的分享也纳入一起，采用短链的方式分享。管理纳入一起。」
 #
-# ★ 这一节只放**安全不变量**，完整链路见 tools/_test_shares.py ★
-#   分享是免登录可达的面，越权/穿越/泄漏必须在这里也守住一道。
+# ★ 这一节只放**安全不变量**，完整链路见 tools/_test_shares.py 与 _test_links.py ★
+#   分享与短链都是免登录可达的面，越权/穿越/泄漏必须在这里也守住一道。
+from app import shortlink as link_mod
 from app import shares as shares_mod
 
 shares_mod.init_db()
-check("shares 表已建立", True)
+_c = users.conn()
+_names = {r["name"] for r in _c.execute(
+    "SELECT name FROM sqlite_master WHERE type='table'")}
+_c.close()
+check("统一链接表 links 已建立", "links" in _names, f"tables={sorted(_names)}")
+check("旧的 shares 表已并入 links（不再单独存在）", "shares" not in _names,
+      f"tables={sorted(_names)}")
 
-_sdoc = _p1[0]  # 第一个映射（文档）
-# 造一个可分享的文件
+# ★ 两类链接在**同一张表**里靠 kind 区分：file=直链、share=分享 ★
+_doc_mount = _p1[0]  # 第一个映射（文档）
 _shf = M1 / "share-me.txt"
 _shf.write_text("share content\n", encoding="utf-8")
 
@@ -461,8 +475,10 @@ _sh = shares_mod.create(
     owner="admin", mount="文档", path="/share-me.txt",
     name="share-me.txt", is_dir=False, ttl=3600, max_visits=0, password="",
 )
-check("创建分享返回 token", bool(_sh.token) and len(_sh.token) >= 24,
-      f"len={len(_sh.token)}")
+# ★ token 12 字符 = 72 bit ★
+#   与短链同规格（地址才短）；早期是 32 字符，合并后刻意统一缩短。
+check("分享 token 是 12 字符（72 bit，不可枚举仍成立）",
+      bool(_sh.token) and len(_sh.token) == 12, f"len={len(_sh.token)}")
 check("无密码分享 has_password=False", _sh.has_password is False)
 check("分享默认未过期且有效", _sh.alive and not _sh.expired)
 
@@ -473,6 +489,18 @@ check("两次创建的 token 不同（随机性）", _sh.token != _sh2.token)
 
 check("按 token 查得到", shares_mod.get(_sh.token) is not None)
 check("伪造 token 查不到", shares_mod.get("bogus-token-xxxx") is None)
+
+# ★ 直链与分享可以共存于同一路径（部分唯一索引只约束 file）★
+_lk = link_mod.get_or_create("admin", "文档", "/share-me.txt", "share-me.txt")
+check("同路径也能签一条直链（与分享共存）", _lk is not None and _lk.kind == "file")
+check("直链 token 也是 12 字符", len(_lk.token) == 12, f"len={len(_lk.token)}")
+check("直链与分享是两个不同 token", _lk.token != _sh.token)
+check("★ kind 隔离：分享接口取直链 token 返回 None ★",
+      shares_mod.get(_lk.token) is None)
+check("★ kind 隔离：直链通道取分享 token 返回 None ★",
+      link_mod.get_kind(_sh.token, "file") is None)
+check("直链幂等：同路径再签还是同一个 token",
+      link_mod.get_or_create("admin", "文档", "/share-me.txt").token == _lk.token)
 
 # ★ 密码绝不进 as_dict ★
 _shp = shares_mod.create(owner="admin", mount="文档", path="/share-me.txt",
@@ -497,9 +525,9 @@ check("ttl<=0 → 永不过期（expires_at=0）", _shx.expires_at == 0)
 _shy = shares_mod.create(owner="admin", mount="文档", path="/share-me.txt",
                          name="share-me.txt", is_dir=False, ttl=3600)
 # 手工把它改成"已过期"（不 sleep）
-import sqlite3 as _sq  # noqa: E402
+#   ★ 表名是 links（合并后 shares 已不存在）★
 _c = users.conn()
-_c.execute("UPDATE shares SET expires_at = ? WHERE token = ?", (1, _shy.token))
+_c.execute("UPDATE links SET expires_at = ? WHERE token = ?", (1, _shy.token))
 _c.commit(); _c.close()
 check("过期判定生效", shares_mod.get(_shy.token).expired)
 check("过期后 alive=False", not shares_mod.get(_shy.token).alive)
@@ -526,6 +554,29 @@ n = shares_mod.revoke_under_path("admin", "文档", "/dir/a")
 check("目录失效会带上子路径（2 条）", n == 2, f"n={n}")
 _rest = {s.path for s in shares_mod.list_by_owner("admin")}
 check("同前缀兄弟 /dir/abc 未被误伤", "/dir/abc" in _rest, f"{sorted(_rest)}")
+
+# ★★ 合并成一张表最直接的收益 ★★
+#   fileops.py 只调了 shares.revoke_under_path()，但因为它现在走**统一存储**，
+#   直链也被一并清掉。（合并前：删了文件，分享清了、短链留下当死链。）
+_lk2 = link_mod.get_or_create("admin", "文档", "/del-both.txt", "del-both.txt")
+_shb = shares_mod.create(owner="admin", mount="文档", path="/del-both.txt",
+                         name="del-both.txt", is_dir=False, ttl=3600)
+_n2 = shares_mod.revoke_under_path("admin", "文档", "/del-both.txt")
+check("删除时「分享 + 直链」一起失效（n>=2）", _n2 >= 2, f"n={_n2}")
+check("直链确实被清掉（不再留死链）", link_mod.get(_lk2.token) is None)
+check("分享确实被清掉", shares_mod.get(_shb.token) is None)
+
+# ★ 一键清理失效分享（过期 / 超次），且不误伤仍有效的 ★
+_sh_alive = shares_mod.create(owner="admin", mount="文档", path="/share-me.txt",
+                              name="share-me.txt", is_dir=False, ttl=-1)
+_sh_dead = shares_mod.create(owner="admin", mount="文档", path="/share-me.txt",
+                             name="share-me.txt", is_dir=False, ttl=3600,
+                             max_visits=1)
+shares_mod.bump_visit(_sh_dead.token)          # 用掉唯一一次 ⇒ 变"次数用尽"
+_dead_n = link_mod.revoke_dead("admin")
+check("revoke_dead 清掉了失效分享", _dead_n >= 1, f"n={_dead_n}")
+check("失效的那条已删除", shares_mod.get(_sh_dead.token) is None)
+check("仍有效的分享没被误删", shares_mod.get(_sh_alive.token) is not None)
 
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 70)
