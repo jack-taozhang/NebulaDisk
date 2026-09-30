@@ -300,10 +300,22 @@ docservice 日志才说 `convertRequest unexpected outputtype = `）。
   `.iframe-shield` 置顶** —— **附录 §10**
 - **预览引擎分工**：**只有 13 个走 OnlyOffice**（`doc docx docm · xls xlsx xlsm · ppt pptx pptm ·
   pdf csv tsv rtf`），其余全走 kkFileView；护栏 `OO_EDIT_EXT ⊆ KK_EXT` 且 `len ≤ 15` —— **附录 §11**
-- **测试**：**必跑** `bash nebula/tools/run_static_checks.sh`（后端静态，最易漏）+ `run_unit_tests.sh`
-  （**11 套 JS / 411 条**）+ `run_share_tests.sh`（**126 + 119 条**）+ `_share_e2e.sh` + `_tf_run.sh`
+- **分享/直链唯一性（v1.2.6）**：`links` 表 `kind='share'` 上有部分唯一索引
+  `idx_links_target_share(owner, mount, path)`；`create_share()` = **创建或更新**
+  （存活→原地改参数、**token 不变**并回 `reused:true`；已死→撤销换新地址）。唯一性 **per-owner**。
+  ⚠️ 迁移**必须先去重再建索引**（有重复行时 `CREATE UNIQUE INDEX` 报错 ⇒ 老库起不来）。
+  ⚠️ `users._DB_LOCK` 是**非可重入** Lock ⇒ 持锁时绝不调 `revoke()/update()/_apply_share_params()`（静默死锁）。
+- **JS 作用域铁律（v1.2.6）**：**读**未声明的标识符会**直接抛** `ReferenceError`，
+  **赋值不会**（自动建全局）⇒ 漏写 `let x` 只在被读到时炸，且常被 `onClick` 吞掉
+  （表现="点了没反应"）。闸门 `nebula/tools/_test_js_scope.js`（acorn，含常驻负向自检）。
+- **OO 状态栏高度 = 25px（v1.2.6 实测）**：跨源 iframe 读不到 ⇒ 截图喂回 canvas 逐行读 RGB
+  （行 875 是上边框；视口 900）。单文件浮动条 `.sh-float` 用 `bottom: 25px` 做到**空隙 0**。
+  验证脚本里是**自量测断言**（换 OO 大版本会自动变红）。探针 `.verify/probe-oo-rowscan.mjs`。
+- **测试**：**必跑** `bash nebula/tools/run_static_checks.sh`（后端静态，最易漏，含
+  **静态作用域闸门** `_test_js_scope.js`）+ `run_unit_tests.sh`
+  （**11 套 JS / 449 条**）+ `run_share_tests.sh`（**187 + 150 + 19 条**）+ `_share_e2e.sh` + `_tf_run.sh`
 - **真浏览器验证**：工作区 `D:\Docker\.verify\`，共用 `lib/cdp.mjs`。
-  `verify-spa-fixes.mjs`(34) / `verify-share-route.mjs`(76)。**截图必须亲自看**。
+  `verify-spa-fixes.mjs`(120) / `verify-share-route.mjs`(141)。**截图必须亲自看**。
   ⚠️ **各写各的 `out/` 子目录**（共用会被互删）；⚠️ 清理走 safe-delete 垫片，>50 文件会中止。
   **完整清单 + 三个已踩的坑见附录 §13**
 - **测试环境**、**压缩包预览已知行为**、**CAD 查看器**、**共享拷贝**、**运维**、
