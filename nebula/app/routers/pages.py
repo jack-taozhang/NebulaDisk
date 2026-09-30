@@ -595,8 +595,15 @@ async def api_shortlink(
     mount: str = Form(""),
     path: str = Form(""),
     name: str = Form(""),
+    ttl_days: float = Form(None),
 ):
     """为一个「映射 + 路径」签发/复用**直链**（kind='file'），返回可直接打开的短地址。
+
+    ★ 有效期默认 **7 天**（与分享同规格）★
+      用户要求（原话）：「直链 默认 也按7天来。」
+      `ttl_days` 传 0 或负数表示永久；不传则用后端默认（7 天）。
+      ⚠️ 复用已有直链时：**已过期**才会把到期时间往后推（token 不变），
+        没过期就原样返回 —— 不会因为你多点一次"复制"就白送一轮有效期。
 
     ★ 入参用 Form 而不是 JSON body ★
       插件的 `apiPost()` 发的是 **multipart/form-data**；FastAPI 的 `Form()`
@@ -622,7 +629,10 @@ async def api_shortlink(
         # 目录不走直链：正确入口是「分享」(/s/<token>)，它有落地页与浏览能力
         raise _HTTPException(400, "目录不支持直链，请使用「分享」功能")
 
-    lk = shortlink.get_or_create(user["username"], mount, path, name or p.name)
+    # None = 「没指定」⇒ 交给后端默认（新签用 7 天、已存在的不动它的有效期）
+    ttl = None if ttl_days is None else (0 if ttl_days <= 0 else int(ttl_days * 86400))
+    lk = shortlink.get_or_create(user["username"], mount, path,
+                                 name or p.name, ttl=ttl)
     _users.audit(user["username"], "shortlink_create", f"{mount}:{path}", lk.token)
 
     return {
@@ -630,6 +640,8 @@ async def api_shortlink(
         "kind": lk.kind,
         "url": shortlink.url_for(lk.token, _origin(request), lk.kind),
         "name": p.name,
+        # 直链现在默认 7 天 ⇒ 调用方要能显示"到什么时候失效"（0 = 永久）
+        "expiresAt": lk.expires_at,
     }
 
 
@@ -641,6 +653,10 @@ async def short_open(token: str, request: Request, dl: str = ""):
     lk = shortlink.get_kind(token, shortlink.KIND_FILE)
     if not lk:
         return _link_error("短链不存在或已被撤销", 404)
+    # ★ 直链也会过期（默认 7 天）★ —— 过期后不能再吐字节。
+    #   行**保留**不删（否则面板里看不到它、也就没法"续期"）。
+    if lk.expired:
+        return _link_error("短链已过期（可到「链接管理」里续期）", 410)
 
     # ★ 用链接的 owner 去解映射，而不是"无条件放行" ★
     #   短链不绕过映射可见性：owner 已看不到该映射时，链接同步失效。
@@ -753,7 +769,14 @@ async def api_links_update(
     max_visits: int = Form(None),
     password: str = Form(None),
 ):
-    """改备注 / 有效期 / 次数 / 提取码。**只对分享类有意义**。"""
+    """改备注 / 有效期 / 次数 / 提取码。
+
+    ★ 备注与有效期两类都开放；次数 / 提取码只对分享有意义 ★
+      直链**有有效期**（默认 7 天，用户要求「直链 默认 也按7天来」），
+      所以 `ttl_days` 对两类都收 —— 「续期」「改为永久」都要能作用在直链上。
+      但次数上限 / 提取码是分享特有的，直链传了就是调用方理解错了：
+      明确 400 比静默忽略好（静默忽略会让前端以为改成功了）。
+    """
     from fastapi import HTTPException as _HTTPException
 
     from .. import auth as _auth, users as _users
@@ -764,8 +787,9 @@ async def api_links_update(
         raise _HTTPException(404, "链接不存在")
     if not user.get("is_admin") and lk.owner != user["username"]:
         raise _HTTPException(403, "无权修改该链接")
-    if lk.kind != shortlink.KIND_SHARE:
-        raise _HTTPException(400, "直链没有有效期/提取码，无需修改")
+    if lk.kind != shortlink.KIND_SHARE and (
+            max_visits is not None or password is not None):
+        raise _HTTPException(400, "直链没有次数 / 提取码，只能改备注与有效期")
 
     shortlink.update(
         token,
@@ -780,14 +804,40 @@ async def api_links_update(
     return {"ok": True, "link": fresh.as_dict(origin=_origin(request)) if fresh else None}
 
 
+@router.post("/api/links/rotate")
+async def api_links_rotate(request: Request, token: str = Form("")):
+    """**换一条地址**：撤销旧的并立刻签一条新地址（目标与参数不变）。
+
+    ★ 使用场景 ★
+      短链免登录、发出去就收不回。真发错了地方（贴到群里、误发），
+      用户要的是「换一条继续用」，而不是「把这个文件对外关掉」。
+      没有这个接口就得手动两步（撤销 + 重新创建），分享那条还得把
+      提取码 / 有效期 / 次数原样再填一遍。
+
+    返回新的 `{ok, link}`；旧地址**立刻失效**。
+    """
+    from fastapi import HTTPException as _HTTPException
+
+    from .. import auth as _auth, users as _users
+
+    if not token:
+        raise _HTTPException(400, "缺少参数：token")
+    user = _auth.current_user(request)
+    fresh = shortlink.rotate(token, user["username"], bool(user.get("is_admin")))
+    if not fresh:
+        raise _HTTPException(404, "链接不存在，或你没有权限操作它")
+    _users.audit(user["username"], "link_rotate", token, fresh.token)
+    return {"ok": True, "link": fresh.as_dict(origin=_origin(request))}
+
+
 @router.post("/api/links/revoke-dead")
 async def api_links_revoke_dead(request: Request):
-    """一键清理**已失效的分享**（过期 / 次数用尽）。
+    """一键清理**已失效的链接**：过期的（两类都会过期）+ 次数用尽的（只有分享）。
 
-    ★ 为什么不管直链 ★
-      直链没有过期概念，判它死没死必须真去解析文件（开销大，
-      且映射暂时不可用时会把好链接误判成死链）。
-      直链的死链由 `/f/<token>` 命中 404 时**惰性自清**。
+    ★ 还剩下的死链怎么处理 ★
+      直链指向的文件被删除 ⇒ 链接只是"打不开"，行还在（没到过期时间）。
+      那种由 `/f/<token>` 命中「文件真的不存在」时**惰性自清** ——
+      不在批量清理里做，因为判"文件真没了"要真去解析路径，映射抖动会误删好链接。
     """
     from .. import auth as _auth, users as _users
 

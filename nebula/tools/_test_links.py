@@ -24,6 +24,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -173,6 +174,29 @@ def main() -> int:
         ok(len(ftok or "") == 12, "直链 token 是 12 字符", f"len={len(ftok or '')}")
         ok((j.get("url") or "").endswith(f"/f/{ftok}"), "地址是 /f/<token>", j.get("url"))
         ok(len(j.get("url") or "") <= 60, "整条地址足够短", f"{len(j.get('url') or '')} 字符")
+        ok(ftok == _LEGACY_FILE_TOKEN, "复用 v1 老库留下的那条直链（幂等）", ftok)
+        # ★ 历史遗留的直链 expires_at=0（永久）⇒ 不该被"新规则"改小 ★
+        #   把已经发出去的链接有效期缩短，是会坑到用户的。
+        ok((j.get("expiresAt") or 0) == 0,
+           "★ 老库里的永久直链保持永久（不擅自改小已发出的链接）★",
+           f"expiresAt={j.get('expiresAt')}")
+
+        # 全新文件 → 走新规则：★ 用户要求「直链 默认 也按7天来」★
+        r = cli.post("/api/shortlink", data={"mount": "共享", "path": "/victim.txt"})
+        j = r.json()
+        ok(r.status_code == 200, "为全新文件签发直链", r.text[:160])
+        exp = j.get("expiresAt") or 0
+        ok(exp > time.time(), "新直链有有效期（不再是永久）", f"expiresAt={exp}")
+        left = exp - time.time()
+        ok(7 * 86400 - 120 <= left <= 7 * 86400 + 120,
+           "★ 直链默认有效期 = 7 天 ★", f"剩余 {left / 86400:.2f} 天")
+        # ttl_days 显式覆盖
+        r = cli.post("/api/shortlink", data={"mount": "共享", "path": "/victim.txt",
+                                             "ttl_days": 0})
+        ok((r.json().get("expiresAt") or 0) == 0, "ttl_days=0 → 永久（显式要求才算）")
+        r = cli.post("/api/shortlink", data={"mount": "共享", "path": "/victim.txt"})
+        ok((r.json().get("expiresAt") or 0) == 0,
+           "已存在的直链不会被无参调用改回 7 天（幂等优先）")
 
         r2 = cli.post("/api/shortlink", data={"mount": "共享", "path": "/hello.txt"})
         ok(r2.json().get("token") == ftok, "同一文件重复签发 → 同一个 token（幂等）")
@@ -273,7 +297,7 @@ def main() -> int:
         with TestClient(app) as guest:
             ok(guest.get(f"/f/{old_tok}").status_code == 404, "旧入口撤销也真的生效")
 
-        print("\n[9] /api/links/update 只对分享有意义")
+        print("\n[9] /api/links/update：备注与有效期两类都行，次数/提取码只对分享")
         r = cli.post("/api/shares", data={"mount": "共享", "path": "/hello.txt",
                                          "ttl_days": 7, "note": "改前"})
         utok = (r.json().get("share") or {}).get("token")
@@ -284,12 +308,19 @@ def main() -> int:
         ok(upd.get("note") == "改后", "备注改成功", upd.get("note"))
         ok(upd.get("expiresAt", 0) > 0, "有效期仍有效")
         r = cli.post("/api/shortlink", data={"mount": "共享", "path": "/hello.txt"})
-        r = cli.post("/api/links/update", data={"token": r.json()["token"],
-                                                "ttl_days": 1})
-        ok(r.status_code == 400, "对直链改有效期 → 400（直链没有这个维度）",
+        _ftok_for_ttl = r.json()["token"]
+        r = cli.post("/api/links/update", data={"token": _ftok_for_ttl, "ttl_days": 1})
+        ok(r.status_code == 200, "★ 直链也能改有效期（续期）★", f"HTTP {r.status_code} {r.text[:120]}")
+        _newleft = (r.json().get("link") or {}).get("expiresAt", 0) - time.time()
+        ok(0 < _newleft <= 86400 + 120, "改成 1 天后确实是 1 天", f"{_newleft / 86400:.2f} 天")
+        r = cli.post("/api/links/update", data={"token": _ftok_for_ttl, "ttl_days": 0})
+        ok((r.json().get("link") or {}).get("expiresAt") == 0,
+           "直链也能改为永久有效（ttl_days=0）")
+        r = cli.post("/api/links/update", data={"token": _ftok_for_ttl, "max_visits": 5})
+        ok(r.status_code == 400, "★ 直链改次数上限仍 → 400（那是分享特有的）★",
            f"HTTP {r.status_code}")
 
-        print("\n[10] /api/links/revoke-dead 一键清失效分享")
+        print("\n[10] /api/links/revoke-dead 一键清失效链接（过期 / 超次）")
         r = cli.post("/api/shares", data={"mount": "共享", "path": "/hello.txt",
                                          "ttl_days": -1})       # 永久
         alive_tok = (r.json().get("share") or {}).get("token")
@@ -304,6 +335,21 @@ def main() -> int:
         left = {i["token"] for i in cli.get("/api/links").json()["items"]}
         ok(dead_tok not in left, "次数用尽的那条已删除")
         ok(alive_tok in left, "仍有效的分享**没有**被误删")
+
+        # ★ 直链现在也会过期 ⇒ 也要被清掉（同时不能误伤没过期的直链）★
+        r = cli.post("/api/shortlink", data={"mount": "共享", "path": "/hello.txt"})
+        f_expired = r.json()["token"]
+        r = cli.post("/api/shortlink", data={"mount": "共享", "path": "/evil.bat"})
+        f_alive = r.json()["token"]
+        _c2 = sqlite3.connect(str(_DATA / "nebula.db"))
+        _c2.execute("UPDATE links SET expires_at = 1 WHERE token = ?", (f_expired,))
+        _c2.commit()
+        _c2.close()
+        r = cli.post("/api/links/revoke-dead")
+        ok(r.status_code == 200, "清理接口可用", r.text[:120])
+        left2 = {i["token"] for i in cli.get("/api/links").json()["items"]}
+        ok(f_expired not in left2, "★ 过期的**直链**也被清掉 ★")
+        ok(f_alive in left2, "没过期的直链没被误删")
 
         print("\n[11] ★★ fileops 联动：删文件同时清掉直链 + 分享 ★★")
         # 这是合并成一张表最直接的收益：fileops 只调了 shares.revoke_under_path，
@@ -320,6 +366,116 @@ def main() -> int:
         with TestClient(app) as guest:
             ok(guest.get(f"/f/{v_tok}").status_code == 404, "旧直链已失效")
             ok(guest.get(f"/s/{v_stok}").status_code == 404, "旧分享已失效")
+
+        print("\n[12] ★ 换一条地址（rotate）★")
+        # 分享：带提取码 + 次数上限 + 备注，rotate 后这些参数必须**原样继承**
+        r = cli.post("/api/shares", data={"mount": "共享", "path": "/hello.txt",
+                                          "ttl_days": 7, "max_visits": 5,
+                                          "password": "4321", "note": "给张工的"})
+        o = (r.json().get("share") or {})
+        otok = o.get("token")
+        r = cli.post("/api/links/rotate", data={"token": otok})
+        ok(r.status_code == 200, "分享换地址成功", r.text[:200])
+        n = (r.json().get("link") or {})
+        ntok = n.get("token")
+        ok(bool(ntok) and ntok != otok, "拿到了**不同**的新 token",
+           f"{otok} -> {ntok}")
+        ok(n.get("kind") == "share", "类型仍是 share")
+        ok(n.get("hasPassword") is True, "提取码被继承（hasPassword）")
+        ok(n.get("maxVisits") == 5, "次数上限被继承", n.get("maxVisits"))
+        ok(n.get("note") == "给张工的", "备注被继承", repr(n.get("note")))
+        delta = (n.get("expiresAt") or 0) - (o.get("expiresAt") or 0)
+        ok(abs(delta) <= 5, "有效期继承的是**剩余**时间（不凭空延长）",
+           f"expiresAt 差 {delta}s")
+        # 旧提取码必须继续可用（哈希是原样带过去的）
+        with TestClient(app) as guest:
+            g = guest.get(f"/api/s/{ntok}/list", params={"path": ""})
+            ok(g.status_code == 403, "新分享仍要求提取码")
+            ok(guest.post(f"/api/s/{ntok}/unlock",
+                          data={"password": "4321"}).status_code == 200,
+               "原提取码在新地址上有效")
+        with TestClient(app) as guest:
+            ok(guest.get(f"/s/{otok}").status_code == 404, "★ 旧分享地址立刻失效 ★")
+            ok(guest.get(f"/s/{ntok}").status_code == 200, "★ 新分享地址可用 ★")
+
+        # 永久分享 → rotate 后仍永久
+        r = cli.post("/api/shares", data={"mount": "共享", "path": "/hello.txt",
+                                          "ttl_days": -1})
+        ptok = (r.json().get("share") or {}).get("token")
+        r = cli.post("/api/links/rotate", data={"token": ptok})
+        ok((r.json().get("link") or {}).get("expiresAt") == 0,
+           "永久分享换地址后仍永久")
+
+        # 已过期的分享 → rotate 要给一个可用的新有效期（否则出来就是死的）
+        r = cli.post("/api/shares", data={"mount": "共享", "path": "/hello.txt",
+                                          "ttl_days": 7})
+        etok2 = (r.json().get("share") or {}).get("token")
+        _c = sqlite3.connect(str(_DATA / "nebula.db"))
+        _c.execute("UPDATE links SET expires_at = 1 WHERE token = ?", (etok2,))
+        _c.commit()
+        _c.close()
+        r = cli.post("/api/links/rotate", data={"token": etok2})
+        nl = r.json().get("link") or {}
+        ok(r.status_code == 200 and nl.get("expiresAt", 0) > time.time(),
+           "★ 已过期的分享换地址后重新可用（给了默认 7 天）★", r.text[:160])
+        ok(nl.get("alive") is True, "新链接状态为有效")
+
+        # 直链
+        r = cli.post("/api/shortlink", data={"mount": "共享", "path": "/hello.txt"})
+        f_old = r.json()["token"]
+        r = cli.post("/api/links/rotate", data={"token": f_old})
+        ok(r.status_code == 200, "直链换地址成功", r.text[:160])
+        f_new = (r.json().get("link") or {}).get("token")
+        ok(f_new and f_new != f_old, "直链拿到新 token", f"{f_old} -> {f_new}")
+        with TestClient(app) as guest:
+            ok(guest.get(f"/f/{f_old}").status_code == 404, "旧直链失效")
+            ok(guest.get(f"/f/{f_new}").status_code == 200, "新直链可用")
+
+        # 权限与边界
+        with TestClient(app) as bob:
+            _login(bob, "bob", "BobPass@2026")
+            ok(bob.post("/api/links/rotate", data={"token": f_new}).status_code == 404,
+               "★ 非 owner 换地址被拒 ★")
+        ok(cli.post("/api/links/rotate", data={"token": ""}).status_code == 400,
+           "空 token → 400")
+        ok(cli.post("/api/links/rotate", data={"token": "NOPE-xxxx"}).status_code == 404,
+           "不存在的 token → 404")
+
+        print("\n[13] 备注：两类都能改，其余参数只对分享开放")
+        r = cli.post("/api/links/update", data={"token": f_new, "note": "直链也能标注"})
+        ok(r.status_code == 200, "★ 直链可改备注（本轮新增）★", r.text[:160])
+        ok((r.json().get("link") or {}).get("note") == "直链也能标注", "备注写进去了")
+        r = cli.post("/api/links/update", data={"token": f_new, "ttl_days": 1})
+        ok(r.status_code == 200, "★ 直链也能改有效期 ★", f"HTTP {r.status_code}")
+        r = cli.post("/api/links/update", data={"token": f_new, "max_visits": 3})
+        ok(r.status_code == 400, "直链改次数上限 → 400（那是分享特有的）",
+           f"HTTP {r.status_code}")
+
+        print("\n[14] ★ 直链过期后的行为 ★")
+        r = cli.post("/api/shortlink", data={"mount": "共享", "path": "/evil.bat"})
+        xtok = r.json()["token"]
+        with TestClient(app) as guest:
+            ok(guest.get(f"/f/{xtok}").status_code == 200, "过期前 /f 可用")
+        _c3 = sqlite3.connect(str(_DATA / "nebula.db"))
+        _c3.execute("UPDATE links SET expires_at = 1 WHERE token = ?", (xtok,))
+        _c3.commit()
+        _c3.close()
+        with TestClient(app) as guest:
+            rr = guest.get(f"/f/{xtok}")
+            ok(rr.status_code == 410, "★ 过期后 /f → 410（不再吐字节）★",
+               f"HTTP {rr.status_code}")
+            ok("过期" in rr.text, "提示里说清是过期（可去续期）", rr.text[:120])
+        # ★ 行必须留着，否则面板里看不到它、也就没法续期 ★
+        still = {i["token"] for i in cli.get("/api/links").json()["items"]}
+        ok(xtok in still, "过期的直链**仍留在列表里**（可续期，不是被偷偷删掉）")
+        # 幂等签发：命中已过期的行时要自动续期，否则用户拿到的是一条死链
+        r = cli.post("/api/shortlink", data={"mount": "共享", "path": "/evil.bat"})
+        ok(r.json()["token"] == xtok, "重新签发仍是同一条地址（幂等，token 不变）")
+        ok((r.json().get("expiresAt") or 0) > time.time() + 6.5 * 86400,
+           "★ 命中已过期的直链时自动续期（否则拿到的是死链）★",
+           f"expiresAt={r.json().get('expiresAt')}")
+        with TestClient(app) as guest:
+            ok(guest.get(f"/f/{xtok}").status_code == 200, "续期后 /f 又能用了")
 
     print(f"\n结果：{pass_n} 通过 / {fail_n} 失败\n")
     return 1 if fail_n else 0

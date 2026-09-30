@@ -40,6 +40,7 @@ SUITES=(
   _test_kind_filter.js
   _test_iframe_shield.js
   _test_resize_hit.js
+  _test_links_ui.js
 )
 
 # ★ 不能用 mktemp -d ★

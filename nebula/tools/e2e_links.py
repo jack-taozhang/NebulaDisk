@@ -134,6 +134,12 @@ def main() -> int:
         ok(len(tok or "") == 12, "token 12 字符", f"len={len(tok or '')}")
         ok(bool(url) and url.endswith(f"/f/{tok}"), "地址形如 <host>/f/<token>", url)
         ok(len(url or "") <= len(BASE) + 20, f"整条地址很短（{len(url or '')} 字符）", url)
+        # ★ 直链默认 7 天（用户要求：「直链 默认 也按7天来」）★
+        _exp = j.get("expiresAt") or 0
+        _left = _exp - time.time()
+        ok(_exp > 0, "直链有有效期（不再是永久）", f"expiresAt={_exp}")
+        ok(7 * 86400 - 300 <= _left <= 7 * 86400 + 300,
+           "直链默认有效期 = 7 天", f"剩余 {_left / 86400:.2f} 天")
         path_only = url.replace(BASE, "") if url and url.startswith(BASE) else f"/f/{tok}"
 
         # ★ 全新 client，不带任何 Cookie ⇒ 真·免登录 ★
@@ -217,11 +223,32 @@ def main() -> int:
             ok(guest.get(f"/f/{t1}").status_code == 404, "旧直链随之失效")
             ok(guest.get(f"/s/{t2}").status_code == 404, "旧分享随之失效")
 
+        print("\n[8] ★ 换一条地址（rotate，真机）★")
+        # 用 evil.bat（[3] 里传的，上面删的是 plain.txt）——它还在
+        evil_rel = f"/{base_dir}/evil.bat"
+        r = CLI.post("/api/shortlink", data={"mount": label, "path": evil_rel})
+        old = r.json()["token"]
+        r = CLI.post("/api/links/rotate", data={"token": old})
+        ok(r.status_code == 200, "换地址成功", r.text[:200])
+        new = (r.json().get("link") or {}).get("token")
+        ok(bool(new) and new != old, "拿到新 token", f"{old} -> {new}")
+        with httpx.Client(base_url=BASE, timeout=20.0, trust_env=False,
+                          follow_redirects=False) as guest:
+            ok(guest.get(f"/f/{old}").status_code == 404, "★ 旧地址立刻失效 ★")
+            ok(guest.get(f"/f/{new}").status_code == 200, "★ 新地址可用 ★")
+        # 直链也能写备注、也能改有效期（续期）
+        r = CLI.post("/api/links/update", data={"token": new, "note": "e2e 备注"})
+        ok(r.status_code == 200, "直链可写备注", r.text[:160])
+        r = CLI.post("/api/links/update", data={"token": new, "ttl_days": 30})
+        _l30 = (r.json().get("link") or {}).get("expiresAt", 0) - time.time()
+        ok(r.status_code == 200 and 29 * 86400 < _l30 <= 30 * 86400 + 300,
+           "★ 直链可续期（改成 30 天）★", r.text[:160])
+
     finally:
         # ------------------------------------------------------------------
         # 清理：删临时目录 → 回读确认 404
         # ------------------------------------------------------------------
-        print("\n[8] 清理")
+        print("\n[9] 清理")
         r = CLI.post("/api/delete", data={"mount": label, "path": "/" + base_dir})
         ok(r.status_code == 200, f"删除临时目录 /{base_dir}", r.text[:160])
         # /api/stat 是 **GET**（query 参数），别写成 POST
@@ -235,6 +262,40 @@ def main() -> int:
                     CLI.post("/api/links/revoke", data={"token": it["token"]})
         except Exception:  # noqa: BLE001
             pass
+
+    # ------------------------------------------------------------------
+    # 前端产物是否**真的**跟着镜像更新了
+    #   ★ 这一节是 TestClient 永远答不了的：它只证明"后端进程里有代码"，
+    #     不证明"浏览器拿到的是新前端"。镜像里 COPY nebula/web 打错了、
+    #     index.html 忘了引新脚本，后端测试全绿而用户点了没反应。
+    # ------------------------------------------------------------------
+    print("\n[10] 前端产物（链接管理面板 / 二维码）")
+    r = CLI.get("/static/js/links.js")
+    ok(r.status_code == 200 and "const LinkManager" in r.text,
+       "links.js 已下发（链接管理面板）", f"HTTP {r.status_code}")
+    r = CLI.get("/static/js/qr.js")
+    ok(r.status_code == 200 and "const QR" in r.text,
+       "qr.js 已下发（本地二维码）", f"HTTP {r.status_code}")
+    r = CLI.get("/static/js/app.js")
+    ok("btn-links" in r.text, "★ 开始菜单页脚已绑「链接管理」按钮（#btn-links）★")
+    r = CLI.get("/")
+    ok('id="btn-links"' in r.text and 'id="btn-users"' in r.text
+       and r.text.index('id="btn-links"') < r.text.index('id="btn-users"'),
+       "★ 该按钮就在「用户管理」左边 ★")
+    r = CLI.get("/")
+    html = r.text
+    ok("qr.js" in html and "links.js" in html, "index.html 引入了两个新脚本")
+    ok(html.find("/static/js/qr.js") < html.find("/static/js/links.js"),
+       "qr.js 排在 links.js 之前（否则 QR is not defined）")
+    r = CLI.get("/static/css/app.css")
+    ok(".lm-list" in r.text and ".dialog.links" in r.text, "面板样式已下发")
+    # 面板用到的统一接口必须都在
+    # 允许的状态码：401 未登录 / 400 缺参数 / 422 校验失败 —— 都说明"路由在"
+    for p in ("/api/links", "/api/links/rotate", "/api/links/revoke-dead",
+              "/api/links/update"):
+        rr = CLI.post(p) if p != "/api/links" else CLI.get(p)
+        ok(rr.status_code in (200, 400, 401, 403, 422), f"接口 {p} 在线",
+           f"HTTP {rr.status_code}")
 
     print(f"\n结果：{pass_n} 通过 / {fail_n} 失败\n")
     return 1 if fail_n else 0

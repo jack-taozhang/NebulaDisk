@@ -139,14 +139,25 @@
     </div>
     <div class="start-foot-actions">
       <!--
-        用户管理 / 关于本机 / 退出登录
-        ★ 顺序：用户管理 → 关于本机 → 退出登录 ★
+        链接管理 / 用户管理 / 服务器设置 / 关于本机 / 退出登录
+        ★ 顺序：链接管理 → 用户管理 → 服务器设置 → 关于本机 → 退出登录 ★
           用户要求（原话）：「用户管理设置 放到 关于本机 按钮前面。」
-          三个都是 icon-only，文案走 title 悬停提示。
-        ★ 用户管理只在管理员登录时显示 ★
-          普通用户看不到这个按钮（app.js 里按 App.me.isAdmin 控制显隐），
-          点进去也会被后端 require_admin 挡住 —— 双保险。
+                        「链接管理图标按钮 放到用户管理 按钮边上。」
+          ⇒ 链接管理紧挨在用户管理**左边**，同为 icon-only，文案走 title 悬停提示。
+        ★ 链接管理与「用户管理」的可见性**不同** ★
+          链接管理是**每个用户自己的**东西（我的直链 / 我的分享），
+          所有人都能看见；用户管理与服务器设置只在管理员登录时显示。
+        ★ 为什么不做成开始菜单磁贴 ★
+          曾经加过一个「链接管理」磁贴，但用户明确要的是「放到用户管理按钮边上」
+          ⇒ 移到这里（与其它"动作"同一行），不再在磁贴区留重复入口。
       -->
+      <button class="start-power" id="btn-links" title="链接管理（我的直链 / 分享）">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"
+             stroke-linecap="round" stroke-linejoin="round">
+          <path d="M6.6 9.4a3.1 3.1 0 0 0 4.4 0l2.2-2.2a3.1 3.1 0 0 0-4.4-4.4l-1 1"/>
+          <path d="M9.4 6.6a3.1 3.1 0 0 0-4.4 0L2.8 8.8a3.1 3.1 0 0 0 4.4 4.4l1-1"/>
+        </svg>
+      </button>
       <button class="start-power" id="btn-users" title="用户管理" style="display:none">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"
              stroke-linecap="round" stroke-linejoin="round">
@@ -240,7 +251,10 @@
 <script src="/static/js/icons.js"></script>
 <script src="/static/js/api.js"></script>
 <script src="/static/js/shell.js"></script>
+<!-- qr.js 必须排在 links.js 之前：链接管理里的「二维码」直接用 QR.svg(...) -->
+<script src="/static/js/qr.js"></script>
 <script src="/static/js/viewer.js"></script>
+<script src="/static/js/links.js"></script>
 <script src="/static/js/explorer.js"></script>
 <script src="/static/js/app.js"></script>
 

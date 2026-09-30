@@ -530,6 +530,22 @@ function startTileHTML(t, pinned) {
   </div>`;
 }
 
+/* --------------------------------------------------------------------------
+   开始菜单磁贴列表
+   --------------------------------------------------------------------------
+   ★ 为什么这里**没有**内置应用磁贴 ★
+     曾经这里有一个「用户管理」磁贴，用户要求删掉（原话：
+     「开始菜单：文件夹后面的 用户管理 这个按钮去掉」）—— 管理后台入口
+     不该抢注意力。
+     本轮也一度加过「链接管理」磁贴，但用户随后明确指定了位置：
+     「链接管理图标按钮 放到用户管理 按钮边上。」
+     ⇒ 已移成开始菜单**页脚**的 #btn-links（见 index.html / 下面的绑定），
+       磁贴区只留映射目录，不留重复入口。
+     将来若真要加应用磁贴，往 START_APPS 里 push 一条、并在
+     grid.onclick 的 data-app 分支补 case 即可（骨架保留）。
+   ------------------------------------------------------------------------ */
+const START_APPS = [];
+
 function renderStartGrid(grid, me) {
   const pins = readPins();
 
@@ -537,12 +553,9 @@ function renderStartGrid(grid, me) {
   //
   //   ★ 只放映射目录（文件夹）★
   //     需求（原文）：「开始菜单：文件夹后面的 用户管理 这个按钮去掉」
-  //     原先这里还会 push 一个 { app:'admin' } 磁贴「用户管理」，它排在
-  //     所有文件夹磁贴之后，正是用户要删掉的那一个。用户管理入口由
-  //     开始菜单**页脚**的 #btn-users 承担（见 index.html），无需磁贴重复。
-  //     注意：下面的 grid.onclick / 右键固定逻辑仍保留 data-app 分支，
-  //     以便将来重新加回其它应用磁贴，不做破坏性删减。
+  //     用户管理入口由开始菜单**页脚**的 #btn-users 承担，无需磁贴重复。
   const all = [];
+  START_APPS.forEach((a) => all.push(a));
   (me.mounts || []).slice(0, 8).forEach((m) => all.push({
     key: `mount:${m.label}`, name: m.label, mount: m.label,
   }));
@@ -560,16 +573,12 @@ function renderStartGrid(grid, me) {
     || `<div class="start-empty">暂无内容</div>`;
 
   // 3) 左键：打开
-  //
-  //   ★ 这里**不再**有 showUserAdmin 分支 ★
-  //     用户管理磁贴已被移除（见上面第 1 节的说明），留在代码里就是死分支。
-  //     将来若加回应用磁贴，按 data-app 的值在此处补 case 即可 ——
-  //     下面的 `if (app)` 骨架已为此保留。
   grid.onclick = (e) => {
     const app = e.target.closest('[data-app]');
     const mount = e.target.closest('[data-mount]');
     if (app) {
-      // 目前网格里不存在 data-app 磁贴；用户管理入口在开始菜单页脚 #btn-users。
+      // 目前网格里不存在 data-app 磁贴（见上面 START_APPS 的说明）
+      if (app.dataset.app === 'links') LinkManager.open();
     } else if (mount) {
       Explorer.open(mount.dataset.mount, '/');
     }
@@ -1928,6 +1937,21 @@ function bindTaskbar() {
       e.stopPropagation();
       closeStart();
       showAbout();
+    });
+  }
+
+  // 开始菜单页脚：链接管理（紧挨在「用户管理」左边）
+  //
+  // ★ 需求（原文）：「链接管理图标按钮 放到用户管理 按钮边上。」★
+  //   与用户管理不同：它是**每个用户自己的**东西（我的直链 / 我的分享），
+  //   所以不对 isAdmin 做限制，所有人可见。
+  //   打开的是全局面板（不依赖任何窗口），所以先收掉开始菜单再开。
+  const linksBtn = document.getElementById('btn-links');
+  if (linksBtn) {
+    linksBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      closeStart();
+      LinkManager.open();
     });
   }
 

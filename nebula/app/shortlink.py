@@ -231,16 +231,18 @@ class Link:
     last_access_at: int
     has_password: bool
 
-    # ---- 状态（分享类才有意义；file 类恒 alive）----
+    # ---- 状态 ----
+    # ★ 有效期对**两类都适用**（2026-09-30 起直链默认也是 7 天）★
+    #   早先这里写成 `self.kind == KIND_SHARE and ...` —— 直链当年是永久的，
+    #   现在那么写会让过期的直链被误判成"有效"（/f 照发字节）。
     @property
     def expired(self) -> bool:
-        return self.kind == KIND_SHARE and self.expires_at > 0 \
-            and self.expires_at < int(time.time())
+        return self.expires_at > 0 and self.expires_at < int(time.time())
 
     @property
     def exhausted(self) -> bool:
-        return self.kind == KIND_SHARE and self.max_visits > 0 \
-            and self.visits >= self.max_visits
+        # 直链的 max_visits 恒为 0 ⇒ 天然不成立，不必再按 kind 判
+        return self.max_visits > 0 and self.visits >= self.max_visits
 
     @property
     def alive(self) -> bool:
@@ -311,16 +313,73 @@ def _new_token() -> str:
     return secrets.token_urlsafe(TOKEN_BYTES)
 
 
-def get_or_create(owner: str, mount: str, path: str, name: str = "") -> Link:
-    """取该 (owner, mount, path) 已有的 **file 短链**；没有就签一条。
+def get_or_create(owner: str, mount: str, path: str, name: str = "",
+                  ttl: int | None = None) -> Link:
+    """取该 (owner, mount, path) 已有的 **file 直链**；没有就签一条。
 
     ★ 为什么幂等 ★
-      用户在浏览器里连点几次「在浏览器中打开」，若每次都新签一条，
+      用户在浏览器里连点几次「在浏览器里打开」/「复制直链」，若每次都新签一条，
       库里会堆出一串等价 token，撤销时也搞不清该撤哪条。
-      部分唯一索引 `idx_links_target_file` 从数据层保证「一个文件一条短链」。
+      部分唯一索引 `idx_links_target_file` 从数据层保证「一个文件一条直链」。
       ⚠️ 分享（kind='share'）**不在此列**：同一文件可以有多条不同参数的分享。
+
+    ★★ 有效期：直链**不再永久**（2026-09-30 起）★★
+      用户要求（原话）：「直链 默认 也按7天来。」
+      ⇒ 与分享同一个默认值 `DEFAULT_TTL_SECONDS`（7 天）。要永久就显式传 `ttl=0`。
+      ⚠️ 库里**历史遗留**的直链 `expires_at` 仍是 0（永久）—— 它们不动：
+        这条规则只约束**新签发的**直链，把已发出的链接有效期改小本身就不该做。
+
+    ★ `ttl` 的三态（别简化成一个默认值）★
+      · `ttl is None`（**不传**）：新签 → 用默认 7 天；
+        已存在且没过期 → **原样返回，不动它的有效期**。
+        为什么不动：前端「复制直链」每点一次都会走这里，
+        如果每次都把到期时间往后推，那"7 天有效"就永远到不了期 —— 等于没有期限。
+      · `ttl` 是整数（**显式传**，含 0）：调用方明确要了这个期限 ⇒ 就按它设置。
+        含"已存在"的情况（比如界面里选「改为永久有效」）。
+      · `ttl <= 0`：永久。
+
+    ★ 命中「已过期」的行时**自动续期**，而不是返回一条死链 ★
+      本函数是幂等的（同一路径恒同一条），但"同一条"如果已经过期，
+      用户点「复制直链」拿到就是个打不开的地址，而且**界面上什么都看不出来**。
+      ⇒ 这时把到期时间往后推一个 ttl（token 不变，地址也就不变）。
+
+    ★★ 锁：**绝不能**在持 `users._DB_LOCK` 时调 `_refresh_expiry` ★★
+      它是普通 `threading.Lock`（不可重入）⇒ 会**当场死锁**，而且是静默的
+      （进程卡住、无异常、无日志）。第一版就是这么写的，被集成测试卡死抓出来。
+      ⇒ 结构固定为「加锁只做一件事」：
+          ① 加锁读一行 → 放锁
+          ② 需要续期 → 在锁外调（它自己会加锁）
+          ③ 需要插入 → 重新加锁，并在锁内重查一次（防并发重复插入）
     """
     _ensure()
+
+    # ---- ① 先查（只在锁内做读）----
+    found = None
+    with users._DB_LOCK:
+        c = users.conn()
+        try:
+            found = c.execute(
+                "SELECT * FROM links WHERE owner = ? AND mount = ? AND path = ?"
+                " AND kind = ?",
+                (owner, mount, path, KIND_FILE),
+            ).fetchone()
+        finally:
+            c.close()
+
+    # ---- ② 命中：已过期就续期；显式给了 ttl 也照设（★ 在锁外调用 ★）----
+    if found is not None:
+        lk = _row(found)
+        if lk.expired:
+            return _refresh_expiry(lk.token, ttl if ttl is not None
+                                   else DEFAULT_TTL_SECONDS) or lk
+        if ttl is not None:
+            return _refresh_expiry(lk.token, ttl) or lk
+        return lk
+
+    # ---- ③ 没有：插入（锁内再查一次，处理并发）----
+    now = int(time.time())
+    eff = DEFAULT_TTL_SECONDS if ttl is None else ttl
+    expires_at = 0 if eff <= 0 else now + int(eff)
     with users._DB_LOCK:
         c = users.conn()
         try:
@@ -330,28 +389,35 @@ def get_or_create(owner: str, mount: str, path: str, name: str = "") -> Link:
                 (owner, mount, path, KIND_FILE),
             ).fetchone()
             if r:
-                return _row(r)
+                lk = _row(r)
+                if not lk.expired and ttl is None:
+                    return lk
+                # 过期了、或调用方显式给了 ttl ⇒ 需要改有效期。
+                # ⚠️ 锁内不能调 _refresh_expiry（它会再取同一把锁 ⇒ 死锁）⇒
+                #    只能在锁外处理：这里先把 token 记下，出锁后再续期。
+                pending = (lk.token, ttl if ttl is not None else DEFAULT_TTL_SECONDS)
+                c.close()
+                return _refresh_expiry(pending[0], pending[1]) or lk
 
-            now = int(time.time())
             for _ in range(5):
                 tok = _new_token()
                 try:
                     c.execute(
                         "INSERT INTO links"
-                        " (token, owner, mount, path, name, created_at, hits, kind)"
-                        " VALUES (?,?,?,?,?,?,0,?)",
-                        (tok, owner, mount, path, name, now, KIND_FILE),
+                        " (token, owner, mount, path, name, created_at, hits, kind,"
+                        "  expires_at)"
+                        " VALUES (?,?,?,?,?,?,0,?,?)",
+                        (tok, owner, mount, path, name, now, KIND_FILE, expires_at),
                     )
                     c.commit()
                     return Link(
                         token=tok, owner=owner, mount=mount, path=path, name=name,
                         created_at=now, hits=0, kind=KIND_FILE, is_dir=False,
-                        expires_at=0, max_visits=0, visits=0, note="",
+                        expires_at=expires_at, max_visits=0, visits=0, note="",
                         last_access_at=0, has_password=False,
                     )
                 except sqlite3.IntegrityError:
-                    # 两种可能：① token 撞车（概率极低）② 并发下
-                    # (owner,mount,path) 刚被别人插进去 → 无论哪种都重查一次。
+                    # ① token 撞车（概率极低）② 并发下同路径刚被别人插进去
                     c.rollback()
                     r = c.execute(
                         "SELECT * FROM links WHERE owner = ? AND mount = ? AND path = ?"
@@ -363,6 +429,38 @@ def get_or_create(owner: str, mount: str, path: str, name: str = "") -> Link:
             raise RuntimeError("短链 token 连续 5 次冲突，放弃")
         finally:
             c.close()
+
+
+def _refresh_expiry(token: str, ttl: int) -> Link | None:
+    """把一条链接的到期时间改成 now+ttl（ttl<=0 → 永久）。返回更新后的 Link。
+
+    ⚠️ **绝对不能**在持有 `users._DB_LOCK` 时调用本函数
+      —— 它自己会取锁，而那是不可重入的 `threading.Lock`，
+      结果是**静默死锁**（进程卡住、无异常、无日志）。
+    """
+    exp = 0 if ttl <= 0 else int(time.time()) + int(ttl)
+    with users._DB_LOCK:
+        c = users.conn()
+        try:
+            c.execute("UPDATE links SET expires_at = ? WHERE token = ?", (exp, token))
+            c.commit()
+        finally:
+            c.close()
+    return get(token)
+
+
+def _inherit_ttl(lk: "Link") -> int:
+    """rotate 用：算新链接该给多长有效期。
+
+      · 老的是永久的（expires_at=0） → 新的也永久（别把一个永久链接降级成 7 天）
+      · 老的是限时且**未过期**      → 沿用**剩余**时间（不凭空延长）
+      · 老的是限时且**已过期**      → 给默认 7 天
+        （否则"换地址"出来的新品当场又是死的，等于没换成）
+    """
+    if lk.expires_at <= 0:
+        return 0
+    remain = int(lk.expires_at) - int(time.time())
+    return remain if remain > 0 else DEFAULT_TTL_SECONDS
 
 
 def create_share(
@@ -637,13 +735,13 @@ def revoke_under_path(owner: str, mount: str, path: str) -> int:
 
 
 def revoke_dead(owner: str) -> int:
-    """一键清理「已经失效」的分享（过期 / 次数用尽）。
+    """一键清理「已经失效」的链接：**过期**（两类都可能）或**次数用尽**（只有分享）。
 
-    ★ 为什么只清分享 ★
-      file 短链**没有过期概念**，判它"死没死"必须真去解析文件（开销大、
-      而且映射暂时不可用时会误判）。所以死链清理只针对分享；
-      file 短链的死链由 `/f/<token>` 命中「文件真的不存在」时惰性自清
-      （见 `pages.py` 的 short_open）。
+    ★ 还剩下什么不清 ★
+      直链指向的文件被删除时它只是"打不开"，记录仍会在（还没到过期时间）。
+      那种情况由 `/f/<token>` 命中「文件真的不存在」时**惰性自清**
+      （见 `pages.py` 的 short_open）—— 不在批量清理里做，
+      因为判断"文件真没了"要真去解析路径，映射抖动时会误删好链接。
     """
     _ensure()
     now = int(time.time())
@@ -651,12 +749,60 @@ def revoke_dead(owner: str) -> int:
         c = users.conn()
         try:
             cur = c.execute(
-                "DELETE FROM links WHERE owner = ? AND kind = ?"
+                "DELETE FROM links WHERE owner = ?"
                 " AND ((expires_at > 0 AND expires_at < ?)"
                 "      OR (max_visits > 0 AND visits >= max_visits))",
-                (owner, KIND_SHARE, now),
+                (owner, now),
             )
             c.commit()
             return cur.rowcount or 0
         finally:
             c.close()
+
+
+def rotate(token: str, requester: str, is_admin: bool = False) -> Link | None:
+    """**换一条地址**：撤销旧链接，并立刻按同样的目标与参数签一条新的。
+
+    ★ 为什么需要它 ★
+      短链是「链接即凭证」——发出去就收不回。真出了泄漏，
+      光撤销只是把这个文件对外**关掉**；用户真正想要的往往是
+      「换一条地址继续用」。手动做要两步（撤销 + 重新创建），
+      而且分享那一步还得把提取码 / 有效期 / 次数原样再填一遍。
+      这里一次做完，参数与目标完全不变，**只有地址变了**。
+
+    ★ 有效期怎么算（别想当然）★
+      · 原先是永久的（`expires_at == 0`） → 新链接也**永久**
+      · 原先是限时的、**还没过期**      → 沿用**剩余**时间（不凭空延长）
+      · 原先是限时的、**已经过期**      → 给默认 7 天
+        （否则"换地址"出来的新品当场又是死的，等于没换成）
+
+    ★ 提取码 / 次数上限 / 备注 / 目录标记 全部原样继承 ★
+      提取码要**先读哈希再撤销**，否则撤销后就取不到了。
+
+    返回新 Link；token 不存在或无权操作 → None。
+    """
+    lk = get(token)
+    if not lk:
+        return None
+    if not is_admin and lk.owner != requester:
+        return None
+
+    ttl = _inherit_ttl(lk)
+    pw_hash = password_hash(token)      # ★ 必须在 revoke 之前取 ★
+
+    # 撤销：file 类必须真正删掉，否则部分唯一索引会让我们只能拿到同一条
+    if not revoke(token, requester, is_admin=True):
+        return None
+
+    if lk.kind == KIND_FILE:
+        return get_or_create(lk.owner, lk.mount, lk.path, lk.name, ttl=ttl)
+
+    return create_share(
+        lk.owner, lk.mount, lk.path,
+        name=lk.name,
+        is_dir=lk.is_dir,
+        ttl=ttl,
+        max_visits=lk.max_visits,
+        password_hash=pw_hash,
+        note=lk.note,
+    )

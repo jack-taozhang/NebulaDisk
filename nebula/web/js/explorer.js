@@ -1224,7 +1224,7 @@ const Explorer = (() => {
           _selfPath: S.path,
         }),
       },
-      { label: '管理我的链接…', icon: 'share', onClick: () => openLinkManager() },
+      { label: '管理我的链接…', icon: 'share', onClick: () => LinkManager.open() },
       { sep: true },
       { label: S.view === 'grid' ? '切换为列表视图' : '切换为图标视图',
         icon: 'list', onClick: () => toggleView(body, S) },
@@ -1437,25 +1437,32 @@ const Explorer = (() => {
         </div>
 
         <div class="share-result" data-role="result" hidden>
-          <div class="share-label">分享链接（落地页 · 可设提取码 / 有效期）</div>
-          <div class="share-linkrow">
-            <input type="text" data-role="link" readonly>
-            <button class="btn" data-role="copy">复制</button>
-          </div>
-          <div class="share-hint" data-role="hint"></div>
-
-          <div data-role="directwrap" hidden style="margin-top:14px">
-            <div class="share-label">直链（免登录直接打开 / 下载 · 永久有效）</div>
+          <!-- ★ 顺序：直链 → 分享链接（用户要求换位）★
+               直链是"立刻能用、默认 7 天"的那条，放上面；分享链接带落地页与
+               提取码/次数，是"正式分享"那条，放下面。 -->
+          <div data-role="directwrap" hidden>
+            <div class="share-label">直链（免登录 · 直接打开 / 下载）</div>
             <div class="share-linkrow">
               <input type="text" data-role="direct" readonly>
               <button class="btn" data-role="dcopy">复制</button>
             </div>
-            <div class="share-hint">
-              两者都指向同一个文件，但语义不同：分享链接有落地页、可设提取码与次数；
-              直链直接吐字节、免登录、永久有效（撤销请到「管理我的链接」）。
-            </div>
+            <div class="share-hint" data-role="dhint"></div>
           </div>
-        </div>
+
+          <div data-role="sharewrap" style="margin-top:14px">
+            <div class="share-label">分享链接（落地页 · 可设提取码 / 有效期）</div>
+            <div class="share-linkrow">
+              <input type="text" data-role="link" readonly>
+              <button class="btn" data-role="copy">复制</button>
+            </div>
+            <div class="share-hint" data-role="hint"></div>
+          </div>
+
+          <div class="share-hint" style="margin-top:12px">
+            两者都指向同一个文件，但语义不同：直链免登录、直接吐字节、
+            <b>默认 7 天有效</b>；分享链接有落地页、可设提取码与次数。
+            续期 / 改成永久 / 撤销都在「链接管理」里。
+          </div>
       </div>`;
 
     dlg.foot.innerHTML = `
@@ -1469,7 +1476,7 @@ const Explorer = (() => {
     dlg.foot.querySelector('[data-role="close"]').onclick = () => dlg.close();
     dlg.foot.querySelector('[data-role="manage"]').onclick = () => {
       dlg.close();
-      openLinkManager();
+      LinkManager.open();
     };
 
     const copyFrom = async (input, label) => {
@@ -1497,6 +1504,17 @@ const Explorer = (() => {
           note: q('note').value.trim(),
         });
         const sh = r.share || {};
+
+        // ★ 先把「直链」取回来再一次性渲染（只对文件；目录没有直链）★
+        //   顺序换位后直链在上面，如果先显示分享链接、直链再异步补上，
+        //   用户会看到上方先空一格再"跳"出来 —— 观感很差。所以先取后画。
+        //   ⚠️ 失败要**静默**：后端没这功能（旧版）时只隐藏那一块，
+        //      分享本身已经建好了，不该因为"附赠品"拿不到而弹红。
+        let direct = null;
+        if (!entry.isDir) {
+          try { direct = await API.shortlink(S.mount, rel); } catch { direct = null; }
+        }
+
         resBox.hidden = false;
         q('link').value = sh.url || `${location.origin}/s/${sh.token}`;
         q('hint').textContent = [
@@ -1504,24 +1522,20 @@ const Explorer = (() => {
           sh.expiresAt ? `有效期至 ${new Date(sh.expiresAt * 1000).toLocaleDateString()}` : '永久有效',
           sh.maxVisits ? `限 ${sh.maxVisits} 次访问` : '不限次数',
         ].join(' · ');
-        btn.textContent = '重新创建';
 
-        // ★ 顺手把「直链」也取回来（只对文件；目录没有直链）★
-        //   同一张卡片里一次给全两种地址 —— 这正是「管理纳入一起」的前半段。
-        //   ★ 失败不报错 ★：后端没这功能时（旧版）静默隐藏那一块即可，
-        //   分享本身已经建好了，不该因为"附赠品"拿不到而弹红。
         const dw = q('directwrap');
         dw.hidden = true;
-        if (!entry.isDir) {
-          try {
-            const d = await API.shortlink(S.mount, rel);
-            if (d && d.url) {
-              q('direct').value = d.url;
-              dw.hidden = false;
-            }
-          } catch { /* 静默：旧后端没有 /api/shortlink */ }
+        if (direct && direct.url) {
+          q('direct').value = direct.url;
+          // ★ 直链默认 7 天 ⇒ 必须把失效时间告诉用户 ★
+          //   否则他 7 天后发现链接打不开，只会以为"坏了"。
+          q('dhint').textContent = direct.expiresAt
+            ? `有效至 ${new Date(direct.expiresAt * 1000).toLocaleString()}`
+              + '（可在「链接管理」里续期或改为永久）'
+            : '永久有效（可在「链接管理」里撤销）';
+          dw.hidden = false;
         }
-
+        btn.textContent = '重新创建';
         btn.disabled = false;
         Toast.ok('已创建分享', '链接已生成');
       } catch (e) {
@@ -1531,129 +1545,6 @@ const Explorer = (() => {
         btn.disabled = false;
       }
     };
-  }
-
-  /* ======================================================================
-     链接管理（直链 + 分享统一）
-     ======================================================================
-     用户报障原话：
-       「网盘里面自带的分享也纳入一起，采用短链的方式分享。管理纳入一起。」
-
-     后端把两类链接并成一张 links 表（kind=file|share），管理面只留
-     GET /api/links、POST /api/links/revoke、POST /api/links/revoke-dead。
-     所以这里**一个列表管两件事**：
-       · 直链 /f/<token> —— 免登录、直接吐字节、永久有效
-       · 分享 /s/<token> —— 有落地页、可设提取码 / 有效期 / 次数
-     两者 token 都是 12 字符 ⇒ 地址一样短。
-
-     ★ 为什么给「打开」按钮，而不是只给复制 ★
-       短链的价值就是"点开看看对不对"；复制完还得自己粘到地址栏，多一步。
-     ====================================================================== */
-  async function openLinkManager() {
-    const dlg = Dialog.custom({ title: '链接管理', wide: true });
-    dlg.el.innerHTML = '<div class="share-hint">正在载入…</div>';
-    dlg.foot.innerHTML = `
-      <button class="btn" data-role="sweep" style="margin-right:auto">清理失效分享</button>
-      <button class="btn" data-role="close">关闭</button>`;
-    dlg.foot.querySelector('[data-role="close"]').onclick = () => dlg.close();
-
-    let list = [];
-
-    const render = async () => {
-      try {
-        const r = await API.links();
-        list = r.items || [];
-      } catch (e) {
-        dlg.el.innerHTML =
-          `<div class="share-hint" style="color:var(--danger)">载入失败：${esc(e.message)}</div>`;
-        return;
-      }
-      if (!list.length) {
-        dlg.el.innerHTML = '<div class="share-hint">还没有任何链接。'
-          + '在文件上右键「分享」，一次就能同时拿到分享链接与直链。</div>';
-        return;
-      }
-
-      const nFile = list.filter((i) => i.kind === 'file').length;
-      const nShare = list.length - nFile;
-      const header = `<div class="share-hint" style="margin:0 0 9px">`
-        + `共 ${list.length} 条 · 直链 ${nFile} 条 · 分享 ${nShare} 条</div>`;
-
-      dlg.el.innerHTML = header + `<div class="share-list">${list.map((s, i) => {
-        const isFile = s.kind === 'file';
-        const state = isFile
-          ? '直链（永久有效）'
-          : (s.alive ? '有效' : (s.expired ? '已过期' : '次数用尽'));
-        const count = isFile ? `${s.hits || 0} 次打开` : `${s.visits || 0} 次访问`;
-        const last = s.lastAccessAt ? ` · 最近 ${fmtTime(s.lastAccessAt)}` : ' · 从未访问';
-        return `
-        <div class="share-item${isFile || s.alive ? '' : ' dead'}" data-i="${i}">
-          <div class="share-item-main">
-            <div class="share-item-name">
-              <span class="share-kind ${isFile ? 'kind-file' : 'kind-share'}">${isFile ? '直链' : '分享'}</span>
-              ${esc(s.name || s.path || '(未命名)')}
-            </div>
-            <div class="share-item-sub">
-              ${esc(s.mount)}${esc(s.path && s.path !== s.name ? ':' + s.path : '')} ·
-              ${state} · ${count}${last}${s.hasPassword ? ' · 有提取码' : ''}${
-                s.note ? ' · ' + esc(s.note) : ''}
-            </div>
-          </div>
-          <div class="share-item-btns">
-            <button class="btn" data-act="copy" data-i="${i}">复制</button>
-            <button class="btn" data-act="open" data-i="${i}">打开</button>
-            <button class="btn danger" data-act="kill" data-i="${i}">撤销</button>
-          </div>
-        </div>`;
-      }).join('')}</div>`;
-
-      dlg.el.querySelectorAll('[data-act]').forEach((b) => {
-        b.addEventListener('click', async () => {
-          const s = list[Number(b.dataset.i)];
-          if (!s) return;
-          const url = s.url
-            || `${location.origin}${s.kind === 'file' ? '/f/' : '/s/'}${s.token}`;
-
-          if (b.dataset.act === 'copy') {
-            try { await navigator.clipboard.writeText(url); Toast.ok('已复制', url); }
-            catch { Toast.info('链接', url); }
-            return;
-          }
-          if (b.dataset.act === 'open') {
-            window.open(url, '_blank');
-            return;
-          }
-
-          const isFile = s.kind === 'file';
-          const ok = await Dialog.confirm({
-            title: '撤销链接',
-            message: `撤销「${s.name || s.path}」的${isFile ? '直链' : '分享'}？`
-              + '撤销后旧地址立即失效，且不可恢复。',
-            okText: '撤销', danger: true,
-          });
-          if (!ok) return;
-          try {
-            await API.linkRevoke(s.token);
-            Toast.ok('已撤销');
-            await render();
-          } catch (e) { Toast.error('撤销失败', e.message); }
-        });
-      });
-    };
-
-    // ★ 「清理失效分享」只清分享 ★
-    //   直链没有过期概念，判它死没死必须真去解析文件（开销大，
-    //   且盘暂时不可用时会把好链接误判成死链）。直链的死链由后端在
-    //   /f/<token> 命中 404 时惰性自清。
-    dlg.foot.querySelector('[data-role="sweep"]').onclick = async () => {
-      try {
-        const r = await API.linkRevokeDead();
-        Toast.ok('已清理', `删除了 ${r.revoked || 0} 条失效分享`);
-        await render();
-      } catch (e) { Toast.error('清理失败', e.message); }
-    };
-
-    await render();
   }
 
   async function uploadFiles(body, S, files) {

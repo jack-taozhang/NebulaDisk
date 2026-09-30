@@ -413,9 +413,9 @@ required = [
     # ★ 统一链接（2026-09-30）★
     #   短链 /f/{token} 与分享 /s/{token} 并成一张 links 表，管理面只留这一组。
     #   完整链路见 tools/_test_links.py。
-    "/f/{token}", "/api/shortlink", "/api/shortlink/revoke",
+    "/f/{token}", "/api/shortlink", "/api/shortlink/revoke", "/api/shortlinks",
     "/api/links", "/api/links/revoke", "/api/links/update",
-    "/api/links/revoke-dead",
+    "/api/links/rotate", "/api/links/revoke-dead",
 ]
 missing = [p for p in required if p not in paths]
 check(f"路由齐全（{len(required)} 条）", not missing, f"缺失: {missing}")
@@ -577,6 +577,58 @@ _dead_n = link_mod.revoke_dead("admin")
 check("revoke_dead 清掉了失效分享", _dead_n >= 1, f"n={_dead_n}")
 check("失效的那条已删除", shares_mod.get(_sh_dead.token) is None)
 check("仍有效的分享没被误删", shares_mod.get(_sh_alive.token) is not None)
+
+# ★ 换一条地址（rotate）★
+#   短链免登录、发出去收不回 ⇒ "换地址"是撤销之外唯一的补救手段。
+#   这里守三条不变量：① 地址真的变了 ② 提取码/次数/备注参数**原样继承**
+#   ③ 旧地址立刻失效。
+_rot_src = shares_mod.create(owner="admin", mount="文档", path="/share-me.txt",
+                            name="share-me.txt", is_dir=False, ttl=3600,
+                            max_visits=9, password="8888", note="rotate 用")
+_rot_new = link_mod.rotate(_rot_src.token, "admin")
+check("rotate 返回了新链接", _rot_new is not None)
+if _rot_new:
+    check("rotate 换了 token", _rot_new.token != _rot_src.token)
+    check("★ rotate 旧地址立刻失效 ★", shares_mod.get(_rot_src.token) is None)
+    check("rotate 继承提取码", _rot_new.has_password is True)
+    check("rotate 继承次数上限", _rot_new.max_visits == 9)
+    check("rotate 继承备注", _rot_new.note == "rotate 用")
+    check("rotate 继承剩余有效期（不凭空延长）",
+          abs(_rot_new.expires_at - _rot_src.expires_at) <= 5,
+          f"{_rot_new.expires_at} vs {_rot_src.expires_at}")
+check("rotate 非 owner 被拒",
+      link_mod.rotate(_rot_new.token if _rot_new else "x", "alice") is None)
+
+# 直链的备注两类都能改（前端面板每条都有备注列）
+_note_tok = link_mod.get_or_create("admin", "文档", "/share-me.txt").token
+check("★ 直链也能写备注（面板里每条都有备注）★",
+      link_mod.update(_note_tok, note="直链备注") and
+      (link_mod.get(_note_tok).note == "直链备注"))
+
+# ★★ 直链的有效期（用户要求：「直链 默认 也按7天来」）★★
+import time as _time  # noqa: E402
+_fresh = link_mod.get_or_create("admin", "文档", "/ttl-check.txt", "ttl-check.txt")
+_left = _fresh.expires_at - int(_time.time())
+check("★ 新直链默认 7 天有效（不再是永久）★",
+      7 * 86400 - 120 <= _left <= 7 * 86400 + 120, f"剩余 {_left / 86400:.2f} 天")
+check("直链现在也会 expired（不再是 kind 特例）",
+      not _fresh.expired and _fresh.alive)
+# 手工改成已过期 → 状态与落地端都应认账
+_c2 = users.conn()
+_c2.execute("UPDATE links SET expires_at = 1 WHERE token = ?", (_fresh.token,))
+_c2.commit(); _c2.close()
+check("过期的直链被判定为 expired", link_mod.get(_fresh.token).expired)
+check("过期后 alive=False", not link_mod.get(_fresh.token).alive)
+# ★ 幂等签发命中已过期的行 ⇒ 必须自动续期（否则用户拿到的是死链）★
+_re = link_mod.get_or_create("admin", "文档", "/ttl-check.txt")
+check("★ 重新签发会自动续期（token 不变、重新可用）★",
+      _re.token == _fresh.token and _re.expires_at > int(_time.time()) + 6 * 86400,
+      f"expiresAt={_re.expires_at}")
+# 显式 ttl=0 → 永久；不传则不动已有链接的有效期
+check("显式 ttl=0 → 永久", link_mod.get_or_create(
+    "admin", "文档", "/ttl-check.txt", ttl=0).expires_at == 0)
+check("不传 ttl 时**不会**把已有的永久链接改回 7 天",
+      link_mod.get_or_create("admin", "文档", "/ttl-check.txt").expires_at == 0)
 
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 70)

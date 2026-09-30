@@ -191,6 +191,8 @@ const API = (() => {
     links:        (all = false) => get('/api/links', all ? { all: 1 } : {}),
     linkRevoke:   (token) => post('/api/links/revoke', { token }),
     linkRevokeDead: () => post('/api/links/revoke-dead'),
+    //   换一条地址：撤销旧的并立刻签一条新的（目标与参数不变）——「旧地址立刻失效」
+    linkRotate:   (token) => post('/api/links/rotate', { token }),
     linkUpdate:   (token, { note, ttlDays, maxVisits, password } = {}) => {
       const f = { token };
       if (note !== undefined) f.note = note;
