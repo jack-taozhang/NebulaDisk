@@ -123,6 +123,21 @@ const API = (() => {
     list: (mount, path) => get('/api/list', { mount, path }),
     stat: (mount, path) => get('/api/stat', { mount, path }),
 
+    // ---- 搜索 ----
+    //   ★ 后端本来就是「递归 + 支持后缀名」的 ★
+    //     需求（原文）：「网盘文件夹窗口上面的搜索功能 不支持后缀名和子文件夹
+    //     的搜索」。后端 `/api/search` 从 task24 起就已经是
+    //       · 递归（os.walk 到 _SEARCH_MAX_DEPTH 层，超出报 depthCapped）
+    //       · 后缀名（`_search_terms` 会把 `.pdf` / `*.pdf` 都归一成 `pdf`，
+    //         且 `_hit_rank` 里扩展名精确命中排第 3 档）
+    //     真正缺的只是**前端从来没调过它** —— 搜索框一直在做本地
+    //     `name.includes()`，所以既搜不了子目录也认不出后缀名。
+    //   返回 { ok, terms, hits[], total, reachable, hasMore, scanned, depthCapped }
+    //   每条 hit 自带 `path`（相对**挂载根**），据此才能显示/打开子目录里的命中项。
+    search: (mount, q, path = '', limit = 500, offset = 0) =>
+      get('/api/search', { mount, q, path, limit, offset }),
+
+
     // ---- 操作 ----
     mkdir:  (mount, path, name) => post('/api/mkdir', { mount, path, name }),
     createFile: (mount, path, name) => post('/api/create-file', { mount, path, name }),

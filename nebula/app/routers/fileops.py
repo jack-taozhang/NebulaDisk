@@ -8,6 +8,7 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from starlette.concurrency import run_in_threadpool
 from .. import auth, files, shares, users
 from ..config import settings
 from ..webutil import _mount, _stream_file
@@ -305,64 +306,49 @@ def _hit(name: str, ext: str, terms: list) -> bool:
     return _hit_rank(name, ext, terms) > 0
 
 
-@router.get("/api/search")
-async def api_search(
-    mount: str,
-    q: str = "",
-    path: str = "",
-    limit: int = _SEARCH_MAX_HITS,
-    offset: int = 0,
-    user: dict = Depends(auth.current_user),
-):
-    """在挂载点内**递归**搜索文件名（支持子目录、层级不限，直到深度/扫描上限）。
+def _search_scan(
+    base_dir: Path, root: Path, terms: list, cap: int, off: int, mount: str
+) -> dict:
+    """搜索的**同步**内核 —— 真正的 os.walk 在这里。
+
+    ★ 为什么单独抽成一个函数（2026-10-01 事故）★
+      它原来直接写在 `async def api_search` 的函数体里。本进程是**单 worker 的
+      uvicorn**（见 deploy/nebula-entrypoint.sh 的启动行，没有 --workers），
+      于是「一次同步遍历」= 「把整个事件循环借出去」：
+
+        · 遍历期间任何别的请求都拿不到时间片，连 /healthz（纯内存接口）都超时
+        · docker 健康检查连续失败 ⇒ 容器被判 unhealthy
+        · 用户侧表现为「点一下搜索，整个网盘全挂」
+
+      py-spy 抓到的卡死栈正是这一行：
+          stat (pathlib.py:842) → is_dir (pathlib.py:877)
+          → api_search (app/routers/fileops.py:386)
+      与 preview.py 里记的「压缩包自愈把单 worker 交给一次解压」是**同一类**故障；
+      区别是那边收益太小可以直接删，这边是用户点名要的功能，
+      所以正解是把它**卸载到线程池**（见 api_search 里的 run_in_threadpool）。
 
     参数
-      mount   挂载名
-      q       关键词，空格/逗号/竖线分隔 ⇒ OR
-      path    起始子目录（默认挂载根）
-      limit   本页大小（上限 _SEARCH_MAX_HITS）
-      offset  起始偏移（分页用）
+      base_dir  起始目录（已解析、已确认是目录）
+      root      挂载根（用于算相对路径）
+      terms     关键词列表（已解析、非空）
+      cap       本页大小
+      off       起始偏移
+      mount     挂载名，仅为回显（保持响应字段顺序与旧版一致）
 
-    返回
-      { ok, mount, base, terms, hits:[entry...], total, offset, limit,
-        hasMore, scanned, depthCapped, truncated }
-
-    ★ task24 起语义变更 ★
-      · hits **不再是** os.walk 顺序的任意子集 —— 先全量收集→相关性排序→按
-        offset/limit 切片，同一关键词多次请求结果**稳定可复现**。
-      · total 是**真实命中总数**（不受 limit 影响），前端据此显示「500 / 4520」。
-      · truncated 表示「命中数 > 本次返回数」（还有更多，用 offset 翻页），
-        depthCapped 表示「目录太深/太多没扫完」，两者语义不同，别混。
+    返回就是 api_search 要吐的那个 dict。
     """
-    m = _mount(user["username"], mount)
-
-    base_dir = files.resolve(m, path or "")
-    if not base_dir.is_dir():
-        raise HTTPException(400, "\u8d77\u59cb\u8def\u5f84\u4e0d\u662f\u76ee\u5f55")
-
-    terms = _search_terms(q)
-    if not terms:
-        return {
-            "ok": True, "mount": mount, "base": "", "terms": [],
-            "hits": [], "total": 0, "offset": 0, "limit": 0, "hasMore": False,
-            "scanned": 0, "depthCapped": False, "truncated": False,
-        }
-
-    root = files._resolve_root(m)
-    cap = max(1, min(int(limit or _SEARCH_MAX_HITS), _SEARCH_MAX_HITS))
-    off = max(0, int(offset or 0))
-
-    # (rank, is_dir, lower_name, entry_dict)；只保留前 _SEARCH_MAX_COLLECT 条对象
-    collected = []
-    total = 0              # ★ 真实命中总数（超过 collect 上限后继续计数）
-    scanned = 0
-    depth_capped = False
     try:
         start_rel = "/" + str(base_dir.relative_to(root)).replace("\\", "/")
     except ValueError:
         start_rel = "/"
     if start_rel == "/.":
         start_rel = "/"
+
+    # (rank, is_dir, lower_name, entry_dict)；只保留前 _SEARCH_MAX_COLLECT 条对象
+    collected = []
+    total = 0              # ★ 真实命中总数（超过 collect 上限后继续计数）
+    scanned = 0
+    depth_capped = False
 
     for dirpath, dirnames, filenames in os.walk(base_dir, followlinks=False):
         rel_here = "/" + str(Path(dirpath).relative_to(root)).replace("\\", "/")
@@ -374,8 +360,14 @@ async def api_search(
             dirnames[:] = []
         dirnames[:] = [d for d in dirnames if d not in files.HIDDEN_NAMES]
 
-        names = list(dirnames) + list(filenames)
-        for nm in names:
+        # ★ 不再对每个条目调 Path.is_dir() ★
+        #   os.walk 返回时**已经**把「目录」和「文件」分开装好了
+        #   （dirnames / filenames），这里直接采信即可。
+        #   旧写法对每个条目多打一次 stat()，在 20 万上限下就是 20 万次多余的
+        #   系统调用；网络盘上这一项能占掉整个扫描时间的大头，
+        #   而且正是 py-spy 抓到的那一帧。用 (名字, 是否目录) 元组顺序遍历，
+        #   既不丢信息也不多一次 stat。
+        for nm, is_dir in [(d, True) for d in dirnames] + [(f, False) for f in filenames]:
             if nm in files.HIDDEN_NAMES:
                 continue
             scanned += 1
@@ -383,7 +375,6 @@ async def api_search(
                 depth_capped = True
                 break
             p = Path(dirpath) / nm
-            is_dir = p.is_dir()
             ext = "" if is_dir else files.ext_of(nm)
             rank = _hit_rank(nm, ext, terms)
             if not rank:
@@ -426,6 +417,70 @@ async def api_search(
         # truncated = 「还有更多命中没返回」（可翻页），与 depthCapped 区分
         "truncated": has_more,
     }
+
+
+@router.get("/api/search")
+async def api_search(
+    mount: str,
+    q: str = "",
+    path: str = "",
+    limit: int = _SEARCH_MAX_HITS,
+    offset: int = 0,
+    user: dict = Depends(auth.current_user),
+):
+    """在挂载点内**递归**搜索文件名（支持子目录、层级不限，直到深度/扫描上限）。
+
+    参数
+      mount   挂载名
+      q       关键词，空格/逗号/竖线分隔 ⇒ OR
+      path    起始子目录（默认挂载根）
+      limit   本页大小（上限 _SEARCH_MAX_HITS）
+      offset  起始偏移（分页用）
+
+    返回
+      { ok, mount, base, terms, hits:[entry...], total, offset, limit,
+        hasMore, scanned, depthCapped, truncated }
+
+    ★ task24 起语义变更 ★
+      · hits **不再是** os.walk 顺序的任意子集 —— 先全量收集→相关性排序→按
+        offset/limit 切片，同一关键词多次请求结果**稳定可复现**。
+      · total 是**真实命中总数**（不受 limit 影响），前端据此显示「500 / 4520」。
+      · truncated 表示「命中数 > 本次返回数」（还有更多，用 offset 翻页），
+        depthCapped 表示「目录太深/太多没扫完」，两者语义不同，别混。
+
+    ★ 2026-10-01 起：扫描在**线程池**里跑 ★
+      真正的 os.walk 在 _search_scan（同步函数），本路由只用 run_in_threadpool
+      把它外派出去。**不要把遍历挪回本函数体** —— 本进程是单 worker 的 uvicorn，
+      写在 async def 里就是「一次搜索冻结全站」（/healthz 超时 → 容器 unhealthy）。
+      详见 _search_scan 的注释（含 py-spy 抓到的卡死栈）。
+    """
+    m = _mount(user["username"], mount)
+
+    base_dir = files.resolve(m, path or "")
+    if not base_dir.is_dir():
+        raise HTTPException(400, "\u8d77\u59cb\u8def\u5f84\u4e0d\u662f\u76ee\u5f55")
+
+    terms = _search_terms(q)
+    if not terms:
+        return {
+            "ok": True, "mount": mount, "base": "", "terms": [],
+            "hits": [], "total": 0, "offset": 0, "limit": 0, "hasMore": False,
+            "scanned": 0, "depthCapped": False, "truncated": False,
+        }
+
+    root = files._resolve_root(m)
+    cap = max(1, min(int(limit or _SEARCH_MAX_HITS), _SEARCH_MAX_HITS))
+    off = max(0, int(offset or 0))
+
+    # ★★ 扫描必须离开事件循环 ★★
+    #   具体的内核在 _search_scan（同步、可阻塞）。这里用 run_in_threadpool
+    #   把它丢到 anyio 的工作线程里跑：
+    #     · 事件循环继续转 ⇒ 搜索期间 /healthz、别的目录、别的用户都照常响应
+    #     · run_in_threadpool 来自 starlette（fastapi 的依赖），不引入新依赖
+    #     · 默认线程池上限 40，够用；真被占满也只是搜索排队，不会拖垮全站
+    #   反面教材就是上一版：同一个 async def 里直接 os.walk，
+    #   单 worker 被占死 ⇒ 容器 unhealthy、全站打不开（详见 _search_scan 注释）。
+    return await run_in_threadpool(_search_scan, base_dir, root, terms, cap, off, mount)
 
 
 # ===== NB SEARCH (task21/task24) END =====

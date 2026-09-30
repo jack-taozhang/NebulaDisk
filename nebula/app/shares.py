@@ -43,6 +43,17 @@
   5. **提取码**：可选。密码用 bcrypt（复用 `users.hash_password`），
      **不像 token 那样存明文**。校验通过后发 HttpOnly Cookie
      `nebula_share_<token前16位>`，避免每次翻页都要重输。
+
+  6. **★ 一个目标一条分享 ★**（2026-10-01 新增，见 `shortlink.py` 顶部）
+     用户报障原话：「同一个文件目前可以分享多个路径，这样调整为同一个文件
+     只能分享一个路径，直连一个路径。」（附截图：同一个 `.dwg` 并排两条 `/s/…`）
+     ⇒ 同一个 (owner, mount, path) 至多一条分享 + 一条直链
+       （两个部分唯一索引各管一半；老库重复行由迁移去重）。
+     ⇒ `create()` 因此**同时是"创建"和"更新"**：
+       命中已有的、仍然有效的那条 → 原地写参数，**token 不变**；
+       命中已经死掉的那条（过期 / 超次）→ 撤销后新建（否则返回的是死链）。
+       想知道这次是"新建"还是"复用"，看路由返回的 `reused` 字段
+       （`routers/shares_admin.py` 用 `shortlink.find_share()` 判定）。
 """
 
 from __future__ import annotations
@@ -157,7 +168,13 @@ def create(
     password: str = "",
     note: str = "",
 ) -> Share:
-    """新建分享。ttl<=0 表示永不过期。"""
+    """创建分享。ttl<=0 表示永不过期。
+
+    ★ 幂等：同一个 (owner, mount, path) 只会有**一条**分享（2026-10-01 起）★
+      命中已经存在且仍然有效的那条 → **原地更新参数并返回同一条**（token 不变）；
+      命中已经死掉的那条（过期 / 超次）→ 撤销后新建。
+      详见 `shortlink.create_share()` 与 `shares.py` 顶部第 6 条。
+    """
     lk = shortlink.create_share(
         owner, mount, path,
         name=name,
@@ -185,6 +202,15 @@ def get(token: str) -> Share | None:
 
 def list_by_owner(owner: str) -> list[Share]:
     return [_to_share(lk) for lk in shortlink.list_by_owner(owner, _KIND)]
+
+
+def find_by_target(owner: str, mount: str, path: str) -> Share | None:
+    """这个目标上已有的那条分享（没有 → None）。
+
+    给「重复创建时告诉调用方这是已有链接」用（路由的 `reused` 字段）。
+    """
+    lk = shortlink.find_share(owner, mount, path)
+    return _to_share(lk) if lk else None
 
 
 def list_all() -> list[Share]:

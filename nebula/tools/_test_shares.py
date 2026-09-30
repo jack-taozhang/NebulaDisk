@@ -20,8 +20,10 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import re
+import sqlite3
 import sys
 import tempfile
 import zipfile
@@ -38,6 +40,11 @@ _SHARE_DIR = _TMP / "share"
 _SHARE_DIR.mkdir(parents=True, exist_ok=True)
 (_SHARE_DIR / "hello.txt").write_text("hello nebula\n", encoding="utf-8")
 (_SHARE_DIR / "secret.txt").write_text("TOP SECRET\n", encoding="utf-8")
+# ★ 2026-10-01 新增两个 ★
+#   「一个目标只留一条分享」之后，原本挤在同一个 /hello.txt 上的两条
+#   （"永久"和"限 1 次"）会互相覆盖 ⇒ 各给一个文件，测的才是各自的性质。
+(_SHARE_DIR / "visits-a.txt").write_text("永久那条\n", encoding="utf-8")
+(_SHARE_DIR / "visits-b.txt").write_text("限次那条\n", encoding="utf-8")
 # 目录分享的根：/share/sub，下面再有一层 inner/，用来测「逐层进」
 _sub = _SHARE_DIR / "sub"
 _sub.mkdir(exist_ok=True)
@@ -189,17 +196,22 @@ def main() -> int:
             ok(r.status_code == 200, "被拒后原分享仍然有效（没被误删）")
 
         print("\n[7] 过期与超次")
+        # ⚠️ 这两条**必须落在不同文件上**（2026-10-01「一个目标只留一条分享」）：
+        #    挤在同一个路径上时，第二条会把第一条的参数覆盖掉，
+        #    「永久」和「限 1 次」就变成了同一条分享的两种说法。
         r = cli.post("/api/shares", data={
-            "mount": "共享", "path": "/hello.txt", "ttl_days": -1, "max_visits": 0,
+            "mount": "共享", "path": "/visits-a.txt", "ttl_days": -1, "max_visits": 0,
         })
         # ttl_days<=0 → 永久
         ptok2 = (r.json().get("share") or {}).get("token")
         ok((r.json().get("share") or {}).get("expiresAt") == 0, "ttl_days=-1 → 永久有效")
 
         r = cli.post("/api/shares", data={
-            "mount": "共享", "path": "/hello.txt", "ttl_days": 7, "max_visits": 1,
+            "mount": "共享", "path": "/visits-b.txt", "ttl_days": 7, "max_visits": 1,
         })
         vtok = (r.json().get("share") or {}).get("token")
+        ok(bool(vtok) and vtok != ptok2, "限次那条是独立的一条（不同文件不互相覆盖）",
+           f"{ptok2} / {vtok}")
         with TestClient(app) as guest:
             r1 = guest.get(f"/api/s/{vtok}/raw", params={"path": ""})
             r2 = guest.get(f"/api/s/{vtok}/raw", params={"path": ""})
@@ -445,6 +457,31 @@ def main() -> int:
             ok(znames(r4) == ["内层/中英文名字.pdf", "内层/深一层的.md"],
                "勾一个目录 → 目录整棵打进来", str(znames(r4)))
 
+            # ---------------- ★ 2026-10-01 放宽：item 允许是「相对分享根」的路径 ★ ----------------
+            #   为什么放宽：左侧文件树是**跨目录**勾选的（展开 内层/ 勾一个、
+            #   根层再勾一个），一个「当前目录」表达不了这样的选择集。
+            #   于是 item 统一按分享根解释，仍然逐个过 _resolve_in_share 做越权校验。
+            r5 = guest.get(f"/api/s/{ztok}/zip",
+                           params=[("item", "top.txt"), ("item", "内层/深一层的.md")])
+            ok(znames(r5) == ["top.txt", "内层/深一层的.md"],
+               "跨目录勾选：根层一个 + 子目录一个，包内保留目录层级（不互相覆盖）",
+               f"HTTP {r5.status_code} {znames(r5)}")
+
+            r6 = guest.get(f"/api/s/{ztok}/zip", params=[("item", "内层/深一层的.md")])
+            c6 = unquote(r6.headers.get("content-disposition", ""))
+            ok("深一层的.md.zip" in c6,
+               "勾 1 个**深层**文件 → 包名取末段（不是整条路径）", c6[:140])
+
+            ok(znames(guest.get(f"/api/s/{ztok}/zip", params=[("item", "/内层/")])) ==
+               ["内层/中英文名字.pdf", "内层/深一层的.md"],
+               "item 允许带前导 / 与尾随 /（拼路径时很常见，归一后再解析）")
+
+            # 同一项写两遍（归一后同一条路径）→ 只打一次，不重复入包
+            rd = guest.get(f"/api/s/{ztok}/zip",
+                           params=[("item", "top.txt"), ("item", "./top.txt"), ("item", "/top.txt")])
+            ok(znames(rd) == ["top.txt"], "重复/等价的 item 去重（不会把同一文件打两遍）",
+               str(znames(rd)))
+
             # 没有勾任何项 → 整层（与不带 item 等价）
             ok(znames(guest.get(f"/api/s/{ztok}/zip")) ==
                ["zip-me/top.txt", "zip-me/内层/中英文名字.pdf", "zip-me/内层/深一层的.md"],
@@ -452,7 +489,11 @@ def main() -> int:
 
             # ---- 选择项的越权/非法输入 ----
             #   ★ 接口是公开的，前端不发不代表别人不发 ★
-            for bad_item in ("../secret.txt", "内层/深一层的.md", "..", ".", "", "/etc/passwd"):
+            #   ⚠️ 这里**不能**再放 `内层/深一层的.md` 这种"带 / 的名字"——
+            #      那是本次刻意放开的合法形式（见上面的跨目录用例）。
+            #      判断标准从"长得像不像一个名字"变成了"解析后是否在分享根内"。
+            for bad_item in ("../secret.txt", "内层/../../secret.txt", "..", ".", "",
+                             "/etc/passwd", "内层/../..", "top.txt/../../secret.txt"):
                 rq = guest.get(f"/api/s/{ztok}/zip", params=[("item", bad_item)])
                 ok(rq.status_code >= 400 and b"TOP SECRET" not in rq.content,
                    f"非法选择项 {bad_item!r} 被拒", f"HTTP {rq.status_code}")
@@ -481,6 +522,249 @@ def main() -> int:
             zdir.rmdir()
         except OSError:
             pass
+
+        print("\n[16] ★ 分享网页版式（2026-10-01 第四次：去掉顶栏 + 左侧抽屉文件树）★")
+        # 用户这一轮的原话（a~f 逐条，下面每个小节对应一条）：
+        #   a、最上面那个整条去掉，包括网盘 logo 都去掉；
+        #   b、预览窗口铺满整个页面；
+        #   c、每行右边显示 文件大小和下载图标，不显示日期；
+        #   d、文件树显示在左边，自动隐藏（不要太宽），鼠标靠边面板就可以从左边
+        #      显示出来，宽度可以手动调整；
+        #   e、多选下载按钮 也放到左边的面板上；
+        #   f、有固定图标，固定后就固定在边上，如果没有固定，点击预览窗口，
+        #      那文件树就自动隐藏。
+        #
+        # ★ 钉的是**结构性契约**（有没有常驻横带、谁叠在谁上面、控件归属哪一块、
+        #   默认是否收起），不是配色/间距这类美术偏好 —— 那些改了不该让测试红。
+        # ★ 为什么不用"截图比对"当判据：截图能过而东西是坏的（见仓库备忘里
+        #   DWG 那次 66/0 全绿却还在转圈的教训），静态契约才是能长期守住的。
+        _html = (ROOT / "web" / "share.html").read_text(encoding="utf-8")
+        _css = (ROOT / "web" / "css" / "share.css").read_text(encoding="utf-8")
+        # ★ 匹配规则前先**剥掉注释** ★
+        #   本文件顶部有一段专门讲 `hidden` 的注释，里面就写着
+        #   「`.sh-float { display: flex; }`」这句示例 —— 不剥注释的话
+        #   `re.search(r"\.sh-float\s*\{[^}]*\}")` 会**先命中注释**，
+        #   拿到的是那句示例而不是真规则（实测：报了
+        #   `→ .sh-float { display: flex; }`，而真规则里明明有 right/bottom）。
+        #   这就是"脚本自己在读空气"的典型 —— 判据必须落在**真规则**上。
+        _css_nc = re.sub(r"/\*.*?\*/", "", _css, flags=re.S)
+        _js = (ROOT / "web" / "js" / "share.js").read_text(encoding="utf-8")
+
+        # ================= a：最上面那条整条（含 logo）必须消失 ================
+        # 前两版都栽在"有一条常驻横带"上：第 1 版品牌栏+导航条+裸表格三条，
+        # 第 2 版压成两条但**顶栏仍在**。用户的结论是"整条去掉"——
+        # 问题不在横带里放了什么，而在"有一条常驻横带"本身（它把内容往下推，
+        # 预览就永远不可能铺满整页）。
+        ok(not re.search(r"<header\b", _html, re.I),
+           "share.html 里没有 <header>（顶栏整条去掉）")
+        ok(not re.search(r"\bsh-top\b", _html + _css + _js),
+           "旧的 sticky 顶栏 .sh-top 已彻底移除")
+        ok(not re.search(r"\bsh-brand\b|\bsh-logo\b|\bclass=\"logo", _html + _css),
+           "没有品牌栏 / 网盘 logo（a 条明确点名了 logo）")
+        ok(not re.search(r"\bsh-foot\b", _html + _css + _js),
+           "更早一轮的页脚导航 .sh-foot 也没有回来（上一级不再钉在右下角）")
+        # 页面里不许再有 .sh-head 信息卡：它的内容已并进左面板头部
+        ok(not re.search(r"\bsh-head\b", _html + _css + _js),
+           "信息卡 .sh-head 已并入左面板头部（页面上不再有第二块横带）")
+        ok(not re.search(r"position\s*:\s*sticky", _css),
+           "整个 share.css 里没有任何 sticky —— 常驻横带才是问题本身")
+
+        # ================= b：预览铺满整个页面 ================================
+        app_rule = re.search(r"#share-app\s*\{([^}]*)\}", _css)
+        ok(bool(app_rule) and "fixed" in app_rule.group(1) and "inset" in app_rule.group(1),
+           "#share-app 铺满视口（position:fixed + inset）")
+        main_rule = re.search(r"\.sh-main\s*\{([^}]*)\}", _css)
+        ok(bool(main_rule), "share.css 里有 .sh-main 规则")
+        if main_rule:
+            mb = main_rule.group(1)
+            ok("position" in mb and "absolute" in mb,
+               ".sh-main 是 absolute（浮层式布局：左面板滑出不会让它重排、iframe 不闪白）")
+            ok(bool(re.search(r"inset\s*:\s*0", mb)),
+               ".sh-main inset:0 —— 真的铺满整页")
+            ok(not re.search(r"\bmargin\s*:", mb) and not re.search(r"\bpadding\s*:", mb),
+               ".sh-main 自身没有 margin/padding 留白（留白会破坏「铺满」）")
+        ok(bool(re.search(r'<main[^>]*class="sh-main"', _html)),
+           "share.html 里有 <main class=\"sh-main\">")
+        ok(bool(re.search(r"\.sh-main\s*>\s*iframe\s*\{[^}]*width\s*:\s*100%", _css)),
+           "预览 iframe 撑满主区（width/height 都 100%）")
+        ok(bool(re.search(r"html\s*,\s*body\s*\{[^}]*overflow\s*:\s*hidden", _css)),
+           "页面自身不滚动（滚动交给主区/面板内部，避免出现第二条滚动条）")
+
+        # ================= c：行右侧 = 大小 + 下载，且不显示日期 ================
+        ok(bool(re.search(r"\.sh-node\s+\.sz\s*\{", _css)), "树行有 .sz（文件大小）")
+        ok(bool(re.search(r"\.sh-node\s+\.sh-row-dl\s*\{", _css)),
+           "树行有 .sh-row-dl（下载图标）")
+        ok(bool(re.search(r"\.sh-node:hover\s+\.sh-row-dl\s*\{[^}]*opacity\s*:\s*1", _css)),
+           "下载图标 hover 变实（默认 .55 常显 —— 不会像纯 hover 那样让人找不到）")
+        row_tpl = re.search(r"function nodeRow\(.*?\n  \}", _js, re.S)
+        ok(bool(row_tpl), "share.js 里有 nodeRow()（树行的唯一产出点）")
+        if row_tpl:
+            rt = row_tpl.group(0)
+            ok("sh-row-dl" in rt, "行模板里带了下载按钮")
+            ok('class="sz"' in rt, "行模板里带了文件大小")
+            # ⚠️ token 表要够宽：第一版只写了「日期|mtime|toLocaleDateString」，
+            #    结果塞一个 `<span class="date">…</span>` 进来照样全绿
+            #    （负向自检当场抓出来的）。日期列落到代码里无非这几种写法。
+            ok(not re.search(r"日期|date|Date|time|Time|mtime|ctime|toLocale", rt),
+               "行模板里**没有日期**（用户明确要求不显示日期）", rt[:200])
+        ok("fmtSize" in _js, "大小有格式化（fmtSize，不是裸字节数）")
+
+        # ================= d / f：左侧抽屉树：默认收起、不太宽、靠边滑出、可拖宽 ======
+        tree_rule = re.search(r"\.sh-tree\s*\{([^}]*)\}", _css)
+        ok(bool(tree_rule), "share.css 里有 .sh-tree 规则")
+        if tree_rule:
+            tb_ = tree_rule.group(1)
+            ok("position" in tb_ and "absolute" in tb_ and "left" in tb_,
+               ".sh-tree 是浮层（absolute + left:0），不挤压预览")
+            ok("translateX(-100%)" in tb_.replace(" ", ""),
+               "默认 translateX(-100%) 收起（用 transform 不用 display：不引发重排、iframe 不闪）")
+            ok("width" in tb_ and "var(--sh-tree-w)" in tb_,
+               "面板宽度走 --sh-tree-w 变量（d：宽度可手动调整）")
+            ok(bool(re.search(r"max-width\s*:", tb_)),
+               "面板有 max-width（窄屏保护，不许盖满整页）")
+        ok(bool(re.search(r'\.sh-tree\[data-open="true"\]\s*\{\s*transform\s*:\s*translateX\(0\)', _css)),
+           "data-open=true 时滑出（收起/滑出由同一个 transform 过渡）")
+        tw = re.search(r"--sh-tree-w\s*:\s*(\d+)px", _css)
+        ok(bool(tw) and int(tw.group(1)) <= 320,
+           "默认宽度 ≤320px（用户要求「不要太宽」）",
+           (tw.group(1) + "px") if tw else "没找到 --sh-tree-w 默认值")
+        ok(bool(re.search(r"\.sh-edge\s*\{", _css)), "有左边缘热区 .sh-edge（鼠标靠边呼出）")
+        edge_rule = re.search(r"\.sh-edge\s*\{([^}]*)\}", _css)
+        if edge_rule and tree_rule:
+            ez = re.search(r"z-index\s*:\s*(\d+)", edge_rule.group(1))
+            tz = re.search(r"z-index\s*:\s*(\d+)", tree_rule.group(1))
+            ok(bool(ez) and bool(tz) and int(ez.group(1)) > 0,
+               "热区有正 z-index（必须高于预览，否则鼠标落在 iframe 上时拉不出面板）")
+            ok(bool(ez) and bool(tz) and int(ez.group(1)) < int(tz.group(1)),
+               "热区 z-index 低于面板（两者重叠时由面板接管点击）")
+        # ⚠️ `~` 只向后找兄弟节点：`.sh-tree[data-open] ~ .sh-edge` 成立的前提是
+        #    .sh-edge 排在 </aside> **之后**。排反了这条规则永远不命中
+        #    （面板打开时提示条还挂着），而且是**静默**的 —— 所以钉一条。
+        # ⚠️ 必须先**去掉 HTML 注释**再比：`</aside>` 这个字样本身也出现在
+        #    热区那段注释文案里（"必须排在 </aside> 之后"），用裸 index()
+        #    比会被自己写的注释骗过 —— 第一版就是这么假绿的
+        #    （负向自检把 sh-edge 挪到 aside 前面，闸门居然全绿）。
+        _html_nc = re.sub(r"<!--.*?-->", "", _html, flags=re.S)
+        ok(_html_nc.index('id="sh-edge"') > _html_nc.index("</aside>"),
+           "热区排在 </aside> 之后（否则 `.sh-tree ~ .sh-edge` 兄弟选择器不生效）")
+        ok("edgeEl.addEventListener('mouseenter', openTree)" in _js,
+           "鼠标靠到左边缘 → 呼出面板")
+        ok(bool(re.search(r"\.sh-grip\s*\{[^}]*cursor\s*:\s*col-resize", _css)),
+           "右缘手柄 .sh-grip 是 col-resize（看得出能拖）")
+        ok("setPointerCapture" in _js,
+           "拖宽用 setPointerCapture（指针滑进 iframe 也不会卡住/松手还在拖）")
+        ok("--sh-tree-w" in _js and "setProperty" in _js,
+           "拖动写的是 --sh-tree-w（d：宽度真的能手动调整）")
+        ok(bool(re.search(r"if\s*\(pinned\)\s*return;", _js)),
+           "固定后 closeTree() 直接返回（f：固定了就固定在边上）")
+        ok(bool(re.search(r"main\.addEventListener\('mousedown',\s*\(\)\s*=>\s*closeTree\(\)\)", _js)),
+           "点预览区（main）→ 文件树自动收起（f：未固定时）")
+        ok("setPinned" in _js and "aria-pressed" in _js,
+           "固定图标切 aria-pressed（视觉与可访问性同一个状态源）")
+        ok(bool(re.search(r'\.sh-pin\[aria-pressed="true"\]\s*\{', _css)),
+           "固定态有独立样式（看得出现在是钉住的）")
+        ok("localStorage" in _js and "shareTreePin" in _js,
+           "固定状态记在 localStorage（刷新/换页后还在）")
+        ok(bool(re.search(r'id="sh-pin"', _html)), "share.html 里有固定图标 #sh-pin")
+
+        # ================= e：多选下载按钮在**左面板**里 ======================
+        aside_m = re.search(r'<aside[^>]*class="sh-tree"[^>]*>(.*?)</aside>', _html, re.S)
+        ok(bool(aside_m), "share.html 里有左面板 <aside class=\"sh-tree\">")
+        if aside_m:
+            am = aside_m.group(1)
+            ok('id="sh-zip"' in am and 'id="sh-selall"' in am,
+               "「打包下载 / 全选」在左面板**内部**（e：多选下载按钮放到左边面板上）")
+            ok('id="sh-pin"' in am, "固定图标在面板头部（f）")
+            ok('id="sh-tree-body"' in am, "树本体也在面板里")
+        ok("zipUrl" in _js and "append('item'" in _js,
+           "打包下载用重复的 item 参数传**根相对路径**（跨目录勾选才有意义）")
+
+        # ================= 不能破的既有约定 ==================================
+        ok("mountPreview" in _js,
+           "单文件与「目录里点开文件」共用同一个 mountPreview（不做两套预览逻辑）")
+        ok(not re.search(r"\bid=[\"']sh-open[\"']", _html) and "sh-open" not in _js,
+           "没有「预览 / 下载」的中间卡片（旧版让访客多点一次的那一步）")
+        # 类型着色：靠 k-<类型> class（没有它树里就是一列灰方块）
+        for k in ("k-dir", "k-image", "k-video", "k-audio", "k-text",
+                  "k-doc", "k-pdf", "k-cad", "k-archive", "k-file"):
+            ok(f".sh-ico.{k}" in _css, f"share.css 定义了类型色 .sh-ico.{k}")
+        # 「无法在线预览」那条提示必须会**自己消失**（切到下一个文件还挂着会挡内容）
+        ok(bool(re.search(r"setTimeout\(\s*\(\)\s*=>\s*\{\s*t\.hidden\s*=\s*true", _js)),
+           "toast 有自动消失（不会一直挂在屏幕上）")
+        # `hidden` 属性必须真的隐藏（作者样式里的 display: 会盖掉 UA 的 display:none）
+        ok(bool(re.search(r"\[hidden\]\s*\{\s*display\s*:\s*none\s*!important", _css)),
+           "[hidden] 用 !important 兜住（否则 .sh-float 的 display:flex 会让它照样显示）")
+
+        # ★★ 单文件分享的「文件名 + 下载」必须在**显示区右下角** ★★        #   用户原话：「所有单文件分享界面 文件名 和 下载按钮 放到显示区域的
+        #              右下角。包括OO」
+        #   ⚠️ 判据必须是**定位属性本身**，不能只查"这枚浮动条还在" ——
+        #      上一版它就在（top:12px; left:12px），"存在"这个判据在改动前后
+        #      都是绿的，等于没守。钉 right/bottom，并禁止再出现 top/left 定位。
+        _flm = re.search(r"\.sh-float\s*\{[^}]*\}", _css_nc)
+        _flrule = _flm.group(0) if _flm else ""
+        ok(bool(_flrule), "share.css 里有 .sh-float 规则", _flrule[:80])
+        ok(bool(re.search(r"right\s*:\s*\d+px", _flrule))
+           and bool(re.search(r"bottom\s*:\s*\d+px", _flrule)),
+           "★ 浮动条用 right + bottom 定位（显示区右下角）★", _flrule[:220])
+        ok(not re.search(r"(?:^|[;{\s])(?:top|left)\s*:", _flrule),
+           "★ 规则里不再有 top / left 定位（否则会贴回左上角）★", _flrule[:220])
+        # ★ 「包括OO」：单文件分支里不许因为预览类型把浮动条藏起来 ★
+        #   实机判据在 verify-share-route.mjs 的 [5c]（OO 下必须可见且在右下角），
+        #   这里只做一条静态兜底：单文件分支里只有 `hidden = false`，没有 `= true`。
+        _si = _js.find("if (isSingle) {")
+        _sb = _js[_si:_si + 1600] if _si >= 0 else ""
+        if "return;" in _sb:
+            _sb = _sb[:_sb.find("return;") + 7]
+        ok("floatBar.hidden = false" in _sb,
+           "单文件分支里**显式**把浮动条显示出来", _sb[:0] or "isSingle 分支")
+        ok("floatBar.hidden = true" not in _sb,
+           "★ 单文件分支里没有把它藏起来（对 OO 也一样）★", "「包括OO」")
+
+        # =================================================================
+        print("\n[17] ★★ 一个目标只有一条分享（2026-10-01 用户要求）★★")
+        # =================================================================
+        # 需求原文（附截图：同一个 .dwg 在链接管理里并排两条 /s/…）：
+        #   「同一个文件目前可以分享多个路径，这样调整为同一个文件只能分享
+        #     一个路径，直连一个路径。」
+        #
+        # ★ 与 _test_links.py 的 [16] 的分工 ★
+        #   那边走 **HTTP 接口**（含 reused 字段、已死那条被换掉）；
+        #   这边走 **compat 壳的 Python API** 并加一条**全局不变式**检查 ——
+        #   「库里任何 (owner, mount, path) 都不许出现两条 share」。
+        #   不变式比逐例断言强：它不挑路径，任何角落漏出一条重复都会被抓住。
+        (_SHARE_DIR / "once.txt").write_text("once\n", encoding="utf-8")
+        s1 = shares.create("admin", "共享", "/once.txt", name="once.txt",
+                           is_dir=False, ttl=7 * 86400)
+        ok(bool(s1.token) and len(s1.token) == 12, "compat 壳建分享", s1.token)
+        ok(shares.find_by_target("admin", "共享", "/once.txt").token == s1.token,
+           "shares.find_by_target 能按目标找到那条（路由的 reused 就靠它）")
+        s2 = shares.create("admin", "共享", "/once.txt", name="once.txt",
+                           is_dir=False, ttl=30 * 86400, max_visits=9, note="改过")
+        ok(s2.token == s1.token, "★ 同一目标再建 → **同一个 token** ★",
+           f"{s1.token} → {s2.token}")
+        ok(s2.max_visits == 9 and s2.note == "改过",
+           "参数被原地写进去了（创建即更新）", f"{s2.max_visits} / {s2.note!r}")
+
+        _c = sqlite3.connect(str(_TMP / "data" / "nebula.db"))
+        _c.row_factory = sqlite3.Row
+        _dup = [dict(r) for r in _c.execute(
+            "SELECT owner, mount, path, COUNT(*) n FROM links WHERE kind='share'"
+            " GROUP BY owner, mount, path HAVING n > 1")]
+        _n_share = _c.execute(
+            "SELECT COUNT(*) FROM links WHERE kind='share'").fetchone()[0]
+        _c.close()
+        ok(not _dup,
+           "★ 全局不变式：库里没有任何 (owner,mount,path) 有两条 share ★",
+           json.dumps(_dup, ensure_ascii=False))
+        ok(_n_share >= 4,
+           "分享确实建了不少（这条不变式不是空库上跑出来的）", f"{_n_share} 条")
+
+        # 面板层：接口给出来的清单里也不许有重复目标
+        r = cli.get("/api/shares")
+        _keys = [(x["owner"], x["mount"], x["path"]) for x in r.json()["shares"]]
+        ok(len(_keys) == len(set(_keys)),
+           "★ /api/shares 的清单里没有重复目标（链接管理不会再并排显示两条）★",
+           f"{len(_keys)} 条 / {len(set(_keys))} 个唯一目标")
 
     print(f"\n结果：{pass_n} 通过 / {fail_n} 失败\n")
     return 1 if fail_n else 0

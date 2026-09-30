@@ -57,6 +57,12 @@ os.environ.setdefault("NEBULA_JWT_SECRET", "test-secret-do-not-use-in-prod")
 # ---- 造一个 v1 老库：links 只有 7 列、另有独立的 shares 表 ----
 _LEGACY_FILE_TOKEN = "legacyFile01"      # 12 字符（与旧实现一致）
 _LEGACY_SHARE_TOKEN = "L" * 32           # 32 字符（旧分享 token 规格）
+# ★ 2026-10-01 新增两个：老库**允许**同一路径有多条分享（当时就是这个行为），
+#   而新规则是一个目标只留一条 ⇒ 迁移必须「**先去重、再建唯一索引**」。
+#   ① 同 owner 同路径、创建得更晚 → 必须被删（保留最早那条）
+#   ② 换成 bob               → **必须保留**（唯一性是 owner 级的，不是全局的）
+_DUP_SHARE_TOKEN = "D" * 32
+_OTHER_OWNER_SHARE_TOKEN = "O" * 32
 
 _db = sqlite3.connect(str(_DATA / "nebula.db"))
 _db.executescript("""
@@ -99,6 +105,22 @@ _db.execute(
     " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
     (_LEGACY_SHARE_TOKEN, "admin", "共享", "/hello.txt", "hello.txt", 0, "",
      1700000001, 0, 0, 3, "老库留档"),
+)
+# 重复项（更晚创建，同 owner）→ 迁移时应被删掉，且**不能**让迁移整体失败
+_db.execute(
+    "INSERT INTO shares (token, owner, mount, path, name, is_dir, password,"
+    " created_at, expires_at, max_visits, visits, note)"
+    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+    (_DUP_SHARE_TOKEN, "admin", "共享", "/hello.txt", "hello.txt", 0, "",
+     1700000002, 0, 0, 0, "重复分享"),
+)
+# 同路径但**另一个 owner** → 必须原样保留（唯一性按 owner 分）
+_db.execute(
+    "INSERT INTO shares (token, owner, mount, path, name, is_dir, password,"
+    " created_at, expires_at, max_visits, visits, note)"
+    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+    (_OTHER_OWNER_SHARE_TOKEN, "bob", "共享", "/hello.txt", "hello.txt", 0, "",
+     1700000003, 0, 0, 0, "别人的分享"),
 )
 _db.commit()
 _db.close()
@@ -159,6 +181,23 @@ def main() -> int:
         ok("idx_links_target" not in idx, "v1 的全表唯一索引已删除")
         ok(any("kind = 'file'" in (v or "") for v in idx.values()),
            "改成了只约束 file 的部分唯一索引", idx)
+        # ★★ 2026-10-01：分享侧也要「一个目标一条」★★
+        #   用户报障原文：「同一个文件目前可以分享多个路径，这样调整为同一个
+        #   文件只能分享一个路径，直连一个路径。」
+        ok("idx_links_target_share" in idx,
+           "★ 新增分享的部分唯一索引 idx_links_target_share ★", sorted(idx))
+        ok(any("kind = 'share'" in (v or "") for v in idx.values()),
+           "它是只约束 share 的**部分**索引（file 那条由另一个索引管）", idx)
+        # ★ 去重必须发生在建索引**之前**：重复行还在时 CREATE UNIQUE INDEX
+        #   会直接报错 ⇒ 整个迁移失败、所有老库都升不上来。
+        #   这里的两条断言正好夹住这个顺序。
+        ok(_DUP_SHARE_TOKEN not in rows,
+           "★ 同 owner 同路径的**重复分享已被去重**（否则上面那条索引建不出来）★",
+           f"存活 {len(rows)} 行")
+        ok(_LEGACY_SHARE_TOKEN in rows,
+           "…保留的是**最早创建**的那条（误点产生的重复里它最可能已发出去）")
+        ok(_OTHER_OWNER_SHARE_TOKEN in rows,
+           "★ 另一个 owner 对**同一路径**的分享没被误删（唯一性是 owner 级的）★")
 
     ok(shares.get(_LEGACY_SHARE_TOKEN) is not None, "兼容壳能取到迁移过来的分享")
     ok(shares.get(_LEGACY_FILE_TOKEN) is None,
@@ -207,15 +246,34 @@ def main() -> int:
         ok(r.status_code == 400, "目录不能签直链（引导用分享）", f"HTTP {r.status_code}")
 
         print("\n[3] ★ 直链与分享可以共存于同一路径（部分唯一索引）★")
+        # ⚠️ 2026-10-01 规则反转后，这一段的行为**变了**，必须看清：
+        #   /hello.txt 上**已经**有一条老库迁过来的 admin 分享
+        #   （`_LEGACY_SHARE_TOKEN`，32 字符的老规格），
+        #   而新规则是「一个目标只留一条、再创建就是**原地更新**」
+        #   ⇒ 这次调用必然**复用**那条老分享（token 不变、reused=true），
+        #     拿到的当然不是新建的 12 字符 token。
+        #   "新建 token 是 12 字符"因此挪到 [16]（那里是真正全新的目标）去验，
+        #   免得把"复用了老分享"误判成"token 长度不对"。
         r = cli.post("/api/shares", data={"mount": "共享", "path": "/hello.txt",
                                          "ttl_days": 7})
         ok(r.status_code == 200, "同一路径仍可创建分享",
            f"HTTP {r.status_code} {r.text[:200]}")
-        stok = (r.json().get("share") or {}).get("token")
-        ok(len(stok or "") == 12, "分享 token 也是 12 字符", f"len={len(stok or '')}")
+        _rj3 = r.json() or {}
+        stok = (_rj3.get("share") or {}).get("token")
+        ok(stok == _LEGACY_SHARE_TOKEN,
+           "★ 与老库那条分享**是同一把地址**（同目标只留一条，不再签第二条）★",
+           f"{_LEGACY_SHARE_TOKEN} -> {stok}")
+        ok(_rj3.get("reused") is True, "响应里 reused=true", str(_rj3.get("reused")))
         ok(stok != ftok, "分享 token 与直链 token 不同（各是一条记录）")
         ok(shares.get(ftok) is None, "★ 分享接口拿直链 token 取不到 ★")
         ok(shortlink.get_kind(stok, "file") is None, "★ 直链通道拿分享 token 取不到 ★")
+        # 共存的正面判据：同一路径上两条记录都在，且 kind 各就各位
+        _r3map = {i["token"]: i for i in cli.get("/api/links").json()["items"]}
+        ok(_r3map.get(ftok, {}).get("kind") == "file"
+           and _r3map.get(stok, {}).get("kind") == "share",
+           "★ 同一路径上「直链(kind=file) + 分享(kind=share)」并存 ★",
+           f"file={_r3map.get(ftok, {}).get('kind')} "
+           f"share={_r3map.get(stok, {}).get('kind')}")
 
         print("\n[4] /f/<token> 落地端")
         with TestClient(app) as guest:          # ★ 全新 client = 未登录 ★
@@ -323,12 +381,19 @@ def main() -> int:
            f"HTTP {r.status_code}")
 
         print("\n[10] /api/links/revoke-dead 一键清失效链接（过期 / 超次）")
-        r = cli.post("/api/shares", data={"mount": "共享", "path": "/hello.txt",
+        # ★ 两条分享必须落在**不同路径**上（2026-10-01 起一个目标只留一条）★
+        #   原先两条都建在 /hello.txt 上：当时的语义是"同一文件多条分享"，
+        #   第二条会覆盖第一条，于是 alive_tok == dead_tok，
+        #   "仍有效的分享没有被误删"就变成了一句自相矛盾的断言。
+        r = cli.post("/api/shares", data={"mount": "共享", "path": "/sub",
                                          "ttl_days": -1})       # 永久
         alive_tok = (r.json().get("share") or {}).get("token")
         r = cli.post("/api/shares", data={"mount": "共享", "path": "/hello.txt",
                                          "ttl_days": 7, "max_visits": 1})
         dead_tok = (r.json().get("share") or {}).get("token")
+        ok(bool(alive_tok) and bool(dead_tok) and alive_tok != dead_tok,
+           "两条分享落在不同路径上，token 不同（同目标才会复用）",
+           f"{alive_tok} / {dead_tok}")
         with TestClient(app) as guest:      # 用掉唯一一次访问 ⇒ 变"次数用尽"
             guest.get(f"/api/s/{dead_tok}/raw", params={"path": ""})
         r = cli.post("/api/links/revoke-dead")
@@ -532,6 +597,126 @@ def main() -> int:
         ok(_items.get(gtok, {}).get("hits") == 1,
            "★ 探测在 touch() 之前 ⇒ 失败的那几次没白烧访问次数 ★",
            f"hits={_items.get(gtok, {}).get('hits')}")
+
+        # =================================================================
+        print("\n[16] ★★ 一个目标只有一条分享（2026-10-01 用户要求）★★")
+        # =================================================================
+        # 需求原文（附截图：同一个 .dwg 在链接管理里并排出现两条 /s/…）：
+        #   「同一个文件目前可以分享多个路径，这样调整为同一个文件只能分享
+        #     一个路径，直连一个路径。」
+        #
+        # ★ 这一节验的是**数据/接口层** ★
+        #   交互层（已有分享时对话框不再给「创建链接」）由 SPA 真机脚本守：
+        #   verify-spa-fixes.mjs 的 [4]。两层都要有 ——
+        #   只做数据层去重的话，界面上照样摆着"再建一条"的按钮。
+        (_DIR / "once.txt").write_text("once\n", encoding="utf-8")
+        r1 = cli.post("/api/shares", data={"mount": "共享", "path": "/once.txt",
+                                          "ttl_days": 7})
+        j1 = r1.json()
+        t1 = (j1.get("share") or {}).get("token")
+        ok(r1.status_code == 200 and bool(t1), "第一次创建分享", r1.text[:160])
+        # 新地址的规格：12 字符（从 [3] 挪过来 —— 那里命中的是老库 32 字符的旧分享）
+        ok(len(t1 or "") == 12, "★ 新建分享的 token 是 12 字符（新地址规格）★",
+           f"len={len(t1 or '')} tok={t1}")
+        ok(j1.get("reused") is False, "第一次是**新建**（reused=false）",
+           str(j1.get("reused")))
+
+        r2 = cli.post("/api/shares", data={"mount": "共享", "path": "/once.txt",
+                                          "ttl_days": 30, "max_visits": 5,
+                                          "password": "8888", "note": "第二遍"})
+        j2 = r2.json()
+        t2 = (j2.get("share") or {}).get("token")
+        s2 = j2.get("share") or {}
+        ok(t2 == t1, "★ 第二次创建 → **同一个 token**（不会再签一条地址）★",
+           f"{t1} → {t2}")
+        ok(j2.get("reused") is True, "★ 响应里 reused=true（前端据此换文案）★",
+           str(j2.get("reused")))
+        ok(s2.get("maxVisits") == 5, "这次传的次数上限**写进去了**",
+           str(s2.get("maxVisits")))
+        ok(s2.get("note") == "第二遍", "备注写进去了", repr(s2.get("note")))
+        ok(s2.get("hasPassword") is True, "提取码写进去了", str(s2.get("hasPassword")))
+        left_once = [i for i in cli.get("/api/links").json()["items"]
+                     if i["kind"] == "share" and i["mount"] == "共享"
+                     and i["path"].strip("/") == "once.txt"]
+        ok(len(left_once) == 1, "★ 库里这个路径**只有一条分享** ★",
+           f"{len(left_once)} 条")
+        with TestClient(app) as guest:
+            ok(guest.get(f"/api/s/{t1}/list",
+                         params={"path": ""}).status_code == 403,
+               "改过提取码后**旧地址继续有效**（只是要多输提取码）")
+            ok(guest.post(f"/api/s/{t1}/unlock",
+                          data={"password": "8888"}).status_code == 200,
+               "新提取码在**同一个地址**上生效（地址没变 ⇒ 已发出去的链接不作废）")
+
+        # 目录同理：复用 [10] 里那条 /sub 的分享
+        r = cli.post("/api/shares", data={"mount": "共享", "path": "/sub",
+                                         "ttl_days": 7})
+        ok((r.json().get("share") or {}).get("token") == alive_tok,
+           "目录也一样复用（拿到的是 [10] 那条 /sub 的分享）",
+           f"{(r.json().get('share') or {}).get('token')} vs {alive_tok}")
+
+        # ★ 已经死掉的那条要**换掉**，不能原样返回 ★
+        #   原样返回的后果：用户重新分享一次，拿到一条**打不开**的链接，
+        #   而且界面上完全看不出来（这正是旧实现的毛病）。
+        (_DIR / "dead.txt").write_text("dead\n", encoding="utf-8")
+        _rj = cli.post("/api/shares", data={"mount": "共享", "path": "/dead.txt",
+                                           "ttl_days": 7}).json()
+        dtok = (_rj.get("share") or {}).get("token")
+        _c4 = sqlite3.connect(str(_DATA / "nebula.db"))
+        _c4.execute("UPDATE links SET expires_at = 1 WHERE token = ?", (dtok,))
+        _c4.commit()
+        _c4.close()
+        r = cli.post("/api/shares", data={"mount": "共享", "path": "/dead.txt",
+                                          "ttl_days": 7})
+        nd = (r.json().get("share") or {}).get("token")
+        ok(bool(nd) and nd != dtok,
+           "★ 命中**已过期**的那条 → 换一条新的（不是把死链还给他）★",
+           f"{dtok} → {nd}")
+        ok(r.json().get("reused") is False, "换掉之后 reused=false（确实是新的）")
+        with TestClient(app) as guest:
+            ok(guest.get(f"/api/s/{nd}").status_code == 200, "新地址当场可用")
+            ok(guest.get(f"/api/s/{dtok}").status_code == 404, "旧的那条已经清掉")
+        left_dead = [i for i in cli.get("/api/links").json()["items"]
+                     if i["kind"] == "share" and i["mount"] == "共享"
+                     and i["path"].strip("/") == "dead.txt"]
+        ok(len(left_dead) == 1,
+           "换掉之后仍然只有一条（不是「换一条留一条」）", f"{len(left_dead)} 条")
+
+        # 次数用尽同理
+        (_DIR / "used.txt").write_text("used\n", encoding="utf-8")
+        _ru = cli.post("/api/shares", data={"mount": "共享", "path": "/used.txt",
+                                           "ttl_days": 7, "max_visits": 1}).json()
+        utok = (_ru.get("share") or {}).get("token")
+        with TestClient(app) as guest:
+            guest.get(f"/api/s/{utok}/raw", params={"path": ""})
+        r = cli.post("/api/shares", data={"mount": "共享", "path": "/used.txt",
+                                          "ttl_days": 7})
+        nu = (r.json().get("share") or {}).get("token")
+        ok(bool(nu) and nu != utok,
+           "★ 次数用尽的那条也会被换掉（否则拿到的是一条 410）★",
+           f"{utok} → {nu}")
+        with TestClient(app) as guest:
+            ok(guest.get(f"/api/s/{nu}/raw",
+                         params={"path": ""}).status_code == 200,
+               "新地址能正常取流")
+
+        # ★ 幂等**不等于**把别人的分享也合掉：唯一性按 owner 分 ★
+        with TestClient(app) as bob:
+            _login(bob, "bob", "BobPass@2026")
+            rb = bob.post("/api/shares", data={"mount": "共享", "path": "/once.txt",
+                                               "ttl_days": 7})
+            btok = (rb.json().get("share") or {}).get("token")
+            ok(bool(btok) and btok != t1,
+               "★ bob 对**同一个文件**能建自己的分享（不与 admin 的那条合并）★",
+               f"bob={btok} admin={t1}")
+            ok(rb.json().get("reused") is False, "对 bob 来说这是新建")
+        adm_tokens = {i["token"] for i in cli.get("/api/links").json()["items"]}
+        ok(t1 in adm_tokens and btok not in adm_tokens,
+           "admin 的列表里看得到自己的、看不到 bob 的（owner 隔离仍成立）")
+
+        # ★ 老库迁移留下的那条 32 字符 token 也还认（别的 owner）★
+        ok(shortlink.get(_OTHER_OWNER_SHARE_TOKEN) is not None,
+           "迁移保留下来的那条跨 owner 分享仍然可查")
 
     print(f"\n结果：{pass_n} 通过 / {fail_n} 失败\n")
     return 1 if fail_n else 0

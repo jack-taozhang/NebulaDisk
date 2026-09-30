@@ -72,11 +72,23 @@ for c in \
 done
 [ -n "$PY" ] || { echo "❌ 找不到 python"; exit 1; }
 
+# 找一个能用的 node（静态作用域闸门需要它）
+# 不写死用户名 —— 同 PY 那边的理由。
+NODE=""
+for c in \
+  "${USERPROFILE:-$HOME}/.workbuddy/binaries/node/versions/22.22.2-3/node.exe" \
+  "${USERPROFILE:-$HOME}/.workbuddy/binaries/node/versions/24.19.0/node.exe" \
+  "node" ; do
+  if command -v "$c" >/dev/null 2>&1; then NODE="$c"; break; fi
+  [ -x "$c" ] && { NODE="$c"; break; }
+done
+[ -n "$NODE" ] || { echo "❌ 找不到 node"; exit 1; }
+
 FAIL=0
 
 # ---------------------------------------------------------------------------
 echo
-echo "════════ 1/5 后端名字解析（nebula/app/）════════"
+echo "════════ 1/6 后端名字解析（nebula/app/）════════"
 if "$PY" "$(winpath "$CHECK")" "$(winpath "$APP")"; then
   echo "  ✅ 通过"
 else
@@ -86,7 +98,7 @@ fi
 
 # ---------------------------------------------------------------------------
 echo
-echo "════════ 2/5 换行符（nebula/ deploy/ 根级脚本；src/ 是上游不扫）════════"
+echo "════════ 2/6 换行符（nebula/ deploy/ 根级脚本；src/ 是上游不扫）════════"
 # ★ 必须在 $ROOT 下用「相对路径 + .」调用 ★
 #   check_eol.py 对「当前目录」这个扫描根只挑根级文件名白名单（build.sh、
 #   Dockerfile、.dockerignore…）；传绝对路径会被当成普通目录整棵递归，
@@ -105,7 +117,7 @@ fi
 
 # ---------------------------------------------------------------------------
 echo
-echo "════════ 3/5 护栏自检 ════════"
+echo "════════ 3/6 护栏自检 ════════"
 
 echo "  ── 3a 名字解析护栏（_undef_fixtures/）──"
 FIXOUT="$("$PY" "$(winpath "$CHECK")" "$(winpath "$FIX")" 2>&1)"
@@ -163,7 +175,7 @@ fi
 
 # ---------------------------------------------------------------------------
 echo
-echo "════════ 4/5 hidden 属性闸门（含自检）════════"
+echo "════════ 4/6 hidden 属性闸门（含自检）════════"
 # ★ 2026-09-30 事故：`[hidden]{display:none}` 只在 UA 样式表里，
 #   作者样式任何一个 `display:` 都能把它盖掉（作者 > UA，不看特异性）⇒
 #   分享落地页的 `.sh-viewer{display:flex}` 让"默认隐藏的预览浮层"永远显示，
@@ -190,7 +202,7 @@ fi
 
 # ---------------------------------------------------------------------------
 echo
-echo "════════ 5/5 预览路由三方一致（含自检）════════"
+echo "════════ 5/6 预览路由三方一致（含自检）════════"
 # ★ 2026-09-30 用户报障：「/s/页面上的预览路由和网盘的路由不一致」★
 #   同一个 DWG：网盘里由 cad-viewer 渲染，分享页却被 kkFileView 打开。
 #   三处判定（后端 route_of / viewer.js / share.js）各写各的 ⇒ 必然漂移，
@@ -211,6 +223,24 @@ if [ "$PARITYRC" = "0" ]; then
 else
   echo "    ❌ 预览路由不一致（改 share.js 时忘了同步 viewer.js？）"
   echo "       三处必须同序：cad → onlyoffice → 原生 → kkfileview → download"
+  FAIL=1
+fi
+
+# ---------------------------------------------------------------------------
+echo
+echo "════════ 6/6 静态作用域闸门（引用了未声明的标识符）════════"
+# 2026-10-01 事故：actShare 引用了 shareBusy，但漏了 `let shareBusy = false;`
+#   ⇒ ReferenceError ⇒ 右键「分享」点了没反应（用户先发现的）。
+# 那类错误只有“跑到那条代码路径”才会暴露，所以这里用静态分析守住。
+# 脚本自带：解析器就绪自检 + 常驻负向自检（故意拿掉声明，必须变红）。
+SCOPE="$(winpath "$HERE/_test_js_scope.js")"
+SCOPEOUT="$("$NODE" "$SCOPE" 2>&1)"
+SCOPERC=$?
+printf '%s\n' "$SCOPEOUT" | sed 's/^/  /'
+if [ "$SCOPERC" = "0" ]; then
+  echo "    ✅ 通过"
+else
+  echo "    ❌ 有“引用了未声明的标识符”（典型：新加的模块级变量忘了写 let）"
   FAIL=1
 fi
 

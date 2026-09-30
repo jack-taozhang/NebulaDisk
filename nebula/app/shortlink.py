@@ -29,11 +29,42 @@
 |---|---|---|
 | 落地端 | `GET /f/<token>` 直取字节 | `GET /s/<token>` 落地页 |
 | token | 12 字符 | **12 字符（本轮从 32 缩到 12）** |
-| 幂等 | **有**（同 (owner,mount,path) 恒同一条） | 无（同一文件可多条，各自带参数） |
-| 有效期 | 无（长期有效） | `expires_at`（0=永久） |
+| 幂等 | **有**（同 (owner,mount,path) 恒同一条） | **有（2026-10-01 起，同一目标只留一条）** |
+| 有效期 | 有（默认 7 天） | `expires_at`（0=永久） |
 | 提取码 | 无 | `password`（bcrypt） |
 | 次数上限 | 无 | `max_visits`（0=不限） |
 | 危险扩展名 | **强制 attachment** | 落地页本身不吐字节 |
+
+### ★★ 2026-10-01 规则反转：分享也变成「一个目标一条」★★
+
+合并当天这里写的是「分享无幂等，同一文件可多条，各自带参数」。**这条已经作废**，
+用户报障原话（附截图：同一个 `.dwg` 在链接管理里并排出现两条 `/s/…`）：
+
+    「同一个文件目前可以分享多个路径，这样调整为同一个文件只能分享一个路径，
+      直连一个路径。」
+
+⇒ 现在的规则：**同一个 (owner, mount, path) 至多一条 `kind='file'` + 一条
+`kind='share'`**（两个部分唯一索引各管一半）。两条索引都已落在库里，
+从数据层保证 —— 而不是靠前端"记得别重复点"。
+
+★ 由此带来的三个语义决定（改之前先读）★
+
+  1. **重复创建 = 原地更新，不是新签一条**
+     `create_share()` 命中已存在且**仍然有效**的那条时，把本次传来的
+     有效期 / 次数 / 提取码 / 备注写进去，**token 不变**（地址不变）。
+     理由：地址已经发出去了，用户改个有效期不该让旧地址失效；
+     真要换地址用 `rotate()`（那是有意为之，会把旧地址作废）。
+  2. **已死的那条（过期 / 次数用尽）会被换掉，而不是原样返回**
+     否则用户重新分享一次，拿到的是条**打不开**的链接，界面上还看不出来。
+     换掉意味着 token 会变 —— 但旧的那条本来就已经是死的。
+  3. **唯一性按 owner 分**（索引里带 owner）
+     甲、乙各自分享同一个文件是两件事：各有各的有效期 / 提取码，
+     而且互相看不到对方的链接（列表本来就是按 owner 过滤的）。
+
+⚠️ **老库迁移的硬顺序：先去重，再建索引**
+   重复行存在时 `CREATE UNIQUE INDEX` 会直接报错 ⇒ **整个迁移失败**、
+   所有老库都升不上来。所以 `_dedupe_shares()` 必须排在建索引之前，
+   保留**最早创建**的那条（误点产生的重复里，最早那条最可能已经发出去）。
 
 ## ★ 对外 API 一个都没改 ★
 
@@ -171,6 +202,48 @@ def _migrate(c: sqlite3.Connection) -> None:
 
     # ③ 旧 shares 表并入（只在它还叫 shares 时跑一次）
     _migrate_legacy_shares(c)
+
+    # ④ ★ 分享也必须「一个目标一条」（2026-10-01）★
+    #    ⚠️ 顺序不能反：重复行还在时 CREATE UNIQUE INDEX 会报错 ⇒ 迁移整体失败。
+    #       而老库**一定**可能有重复行（当时就是这个行为），所以去重是必要前置。
+    gone = _dedupe_shares(c)
+    if gone:
+        print(f"[shortlink] 同一目标的重复分享已合并：删掉 {gone} 条（保留最早创建的）")
+    c.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_links_target_share"
+        " ON links(owner, mount, path) WHERE kind = 'share'"
+    )
+
+
+def _dedupe_shares(c: sqlite3.Connection) -> int:
+    """把「同一 (owner, mount, path) 的多条分享」收敛成**一条**，返回删掉的条数。
+
+    ★ 保留哪一条：最早创建的（created_at 最小；并列时 token 升序，保证确定性）★
+      重复项来自「反复点创建链接」。最早那条是最有可能**已经发出去**的，
+      删它的代价最大；晚产生的那些多半是误点。
+      这一点是判断，不是定论 —— 真要换地址请用 `rotate()`
+      （那会明确告知"旧地址立刻失效"），而不是靠这次迁移顺手换掉。
+
+    ★ 为什么不用窗口函数 ★
+      `ROW_NUMBER() OVER (…)` 要 SQLite ≥ 3.25，而 NAS 上的 Python 版本不可控。
+      本表规模是「用户手动创建的链接」，几百条到头，Python 侧去重足够且可读。
+    """
+    rows = c.execute(
+        "SELECT token, owner, mount, path FROM links WHERE kind = ?"
+        " ORDER BY created_at ASC, token ASC",
+        (KIND_SHARE,),
+    ).fetchall()
+    seen: set[tuple[str, str, str]] = set()
+    dup: list[str] = []
+    for r in rows:
+        key = (str(r["owner"]), str(r["mount"]), str(r["path"]))
+        if key in seen:
+            dup.append(str(r["token"]))
+        else:
+            seen.add(key)
+    for tok in dup:
+        c.execute("DELETE FROM links WHERE token = ?", (tok,))
+    return len(dup)
 
 
 def _migrate_legacy_shares(c: sqlite3.Connection) -> None:
@@ -321,7 +394,8 @@ def get_or_create(owner: str, mount: str, path: str, name: str = "",
       用户在浏览器里连点几次「在浏览器里打开」/「复制直链」，若每次都新签一条，
       库里会堆出一串等价 token，撤销时也搞不清该撤哪条。
       部分唯一索引 `idx_links_target_file` 从数据层保证「一个文件一条直链」。
-      ⚠️ 分享（kind='share'）**不在此列**：同一文件可以有多条不同参数的分享。
+      ★ 分享侧自 2026-10-01 起同理（`idx_links_target_share`，
+        见 `create_share` 与模块顶部「规则反转」一节）★
 
     ★★ 有效期：直链**不再永久**（2026-09-30 起）★★
       用户要求（原话）：「直链 默认 也按7天来。」
@@ -475,17 +549,75 @@ def create_share(
     password_hash: str = "",
     note: str = "",
 ) -> Link:
-    """新建一条**分享**链接（`kind='share'`）。
+    """创建**分享**（`kind='share'`）。ttl<=0 表示永不过期。
 
-    ttl<=0 表示永不过期。★ token 与短链同规格 = 12 字符 ★
+    ★★ 幂等（2026-10-01 起）★★
+      同一个 (owner, mount, path) **至多一条分享**（部分唯一索引
+      `idx_links_target_share`）。命中已有那条时**不新签**，而是：
+
+        · 那条**仍然有效** → 把本次传来的参数**原地写进去**，token 不变。
+          为什么 token 不变：地址可能已经发出去了，改个有效期不该让它失效。
+          ⚠️ 因此本函数**是"创建或更新"**，不是"纯创建"：
+             传 `password_hash=""` 就是「取消提取码」（显式即权威）。
+             调用方若要"只改其中一项"，请用 `update()`（None = 不改）。
+        · 那条**已经死了**（过期 / 次数用尽）→ 先撤销再新建。
+          否则用户重新分享一次，拿到的是一条**打不开**的链接，
+          而且界面上完全看不出来（旧行为正是如此）。
+
+    ★ 锁纪律（与 `get_or_create` 同一套，别改成嵌套）★
+      ① 加锁只读一行 → 放锁；② 改参数 / 撤销（它们各自加锁）都在锁外；
+      ③ 新建时重新加锁并在锁内重查一次（防并发重复插入）。
+      ⚠️ 严禁在持有 `users._DB_LOCK` 时调用 `revoke()` / `update()` / `_refresh_expiry()`
+         —— 那是不可重入的 `threading.Lock`，会**静默死锁**。
     """
     _ensure()
     now = int(time.time())
     expires_at = 0 if ttl <= 0 else now + int(ttl)
 
+    # ---- ① 先查（锁内只做读）----
     with users._DB_LOCK:
         c = users.conn()
         try:
+            found = c.execute(
+                "SELECT * FROM links WHERE owner = ? AND mount = ? AND path = ?"
+                " AND kind = ?",
+                (owner, mount, path, KIND_SHARE),
+            ).fetchone()
+        finally:
+            c.close()
+
+    if found is not None:
+        lk = _row(found)
+        if lk.alive:
+            # ---- ② 活着 → 原地更新（★ 锁外调用，它自己会加锁 ★）----
+            _apply_share_params(
+                lk.token,
+                name=name or lk.name,
+                is_dir=is_dir,
+                expires_at=expires_at,
+                max_visits=int(max_visits or 0),
+                password_hash=password_hash,
+                note=note,
+            )
+            fresh = get(lk.token)
+            return fresh or lk
+        # ---- ③ 已经死了 → 先清掉再新建（★ 锁外调用 ★）----
+        #   不这么做的话，返回值是一条「打不开的链接」——最难排查的那种坏。
+        revoke(lk.token, lk.owner, is_admin=True)
+
+    # ---- ④ 新建（锁内重查一次，处理并发）----
+    with users._DB_LOCK:
+        c = users.conn()
+        try:
+            r = c.execute(
+                "SELECT * FROM links WHERE owner = ? AND mount = ? AND path = ?"
+                " AND kind = ?",
+                (owner, mount, path, KIND_SHARE),
+            ).fetchone()
+            if r:
+                # 并发下刚被别人插进去 ⇒ 复用（并保持它自己的参数不动）
+                return _row(r)
+
             for _ in range(5):
                 tok = _new_token()
                 try:
@@ -508,10 +640,72 @@ def create_share(
                         has_password=bool(password_hash),
                     )
                 except sqlite3.IntegrityError:
-                    c.rollback()  # 只可能是 token 撞车 → 换一个再来
+                    # ① token 撞车（概率极低）② 并发下同目标刚被插进去
+                    c.rollback()
+                    r = c.execute(
+                        "SELECT * FROM links WHERE owner = ? AND mount = ? AND path = ?"
+                        " AND kind = ?",
+                        (owner, mount, path, KIND_SHARE),
+                    ).fetchone()
+                    if r:
+                        return _row(r)
             raise RuntimeError("分享 token 连续 5 次冲突，放弃")
         finally:
             c.close()
+
+
+def _apply_share_params(
+    token: str,
+    *,
+    name: str,
+    is_dir: bool,
+    expires_at: int,
+    max_visits: int,
+    password_hash: str,
+    note: str,
+) -> bool:
+    """把一条**已存在**分享的参数整体覆盖过去（token 不变）。
+
+    ⚠️ **绝对不能**在持有 `users._DB_LOCK` 时调用（它自己要加锁，不可重入 ⇒ 静默死锁）。
+
+    ★ 这里是**覆盖**不是局部修改 ★
+      走这条路的场景是「用户重新填了一遍分享设置并点确定」，
+      表单里就是这几个字段的全量值 ⇒ 空值表示"就是要空"（例如取消提取码）。
+      只想改其中一项的调用方请用 `update()`（None = 不改）。
+    """
+    with users._DB_LOCK:
+        c = users.conn()
+        try:
+            cur = c.execute(
+                "UPDATE links SET name = ?, is_dir = ?, expires_at = ?,"
+                " max_visits = ?, password = ?, note = ? WHERE token = ? AND kind = ?",
+                (name, 1 if is_dir else 0, expires_at, max_visits,
+                 password_hash, note, token, KIND_SHARE),
+            )
+            c.commit()
+            return (cur.rowcount or 0) > 0
+        finally:
+            c.close()
+
+
+def find_share(owner: str, mount: str, path: str) -> Link | None:
+    """按目标取那条分享（没有 → None）。
+
+    给「重复创建时告诉前端这是已有链接」用（见 `routers/shares_admin.py`
+    的 `reused` 字段）。**按 owner 找** —— 唯一性就是 owner 级的。
+    """
+    _ensure()
+    with users._DB_LOCK:
+        c = users.conn()
+        try:
+            r = c.execute(
+                "SELECT * FROM links WHERE owner = ? AND mount = ? AND path = ?"
+                " AND kind = ?",
+                (owner, mount, path, KIND_SHARE),
+            ).fetchone()
+        finally:
+            c.close()
+    return _row(r) if r else None
 
 
 # ---------------------------------------------------------------------------
@@ -790,7 +984,8 @@ def rotate(token: str, requester: str, is_admin: bool = False) -> Link | None:
     ttl = _inherit_ttl(lk)
     pw_hash = password_hash(token)      # ★ 必须在 revoke 之前取 ★
 
-    # 撤销：file 类必须真正删掉，否则部分唯一索引会让我们只能拿到同一条
+    # 撤销：**两类都必须真正删掉**，否则两个部分唯一索引都会让我们只能
+    # 拿到"同一条"（token 没换，"更新分享地址"就等于没做）
     if not revoke(token, requester, is_admin=True):
         return None
 

@@ -136,7 +136,7 @@ bash deploy/up.sh --no-verify      # 跳过 OnlyOffice 链路预检
 
 ```bash
 cd <源码>/ && ./build.sh           # ① 基础镜像 kkfileview:5.0.2（必须在 WSL/Linux 里跑）
-bash nebula/build.sh               # ② 应用镜像 nebula:1.2.5
+bash nebula/build.sh               # ② 应用镜像 nebula:1.2.6
 bash deploy/up.sh --no-build       # ③ 起栈
 ```
 
@@ -162,8 +162,8 @@ bash deploy/export-bundle.sh --save     # 生成 dist/nebula-<ver>/，并导出�
 产出：
 
 ```
-dist/nebula-1.2.5/
-├── nebula-1.2.5.tar (+.sha256)            云盘 + kkFileView 镜像
+dist/nebula-1.2.6/
+├── nebula-1.2.6.tar (+.sha256)            云盘 + kkFileView 镜像
 ├── nebula-cad-viewer-1.7.0.tar (+.sha256) CAD 查看器镜像
 ├── docker-compose.yml                     纯运行版（无 build:）
 ├── .env.example  _common.sh  install.sh  diagnose-oo.sh
@@ -173,7 +173,7 @@ dist/nebula-1.2.5/
 拷到目标机后：
 
 ```bash
-cd /volume1/docker/nebula-1.2.5
+cd /volume1/docker/nebula-1.2.6
 vi .env                                  # 至少改目录、管理员密码、NB_OO_SECRET
 bash install.sh
 ```
@@ -406,7 +406,7 @@ set to "nebula-net" (expected: "default")`** 你把 `networks:` 下面那个 **k
 | `deploy/export-bundle.sh` | 生成 `dist/` 离线镜像包；`--save` 顺带导出 tar |
 | `deploy/.env.example` | 配置模板（变量含义逐条注释） |
 | `build.sh` | 构建基础镜像 `kkfileview:5.0.2`（需 `src/`） |
-| `nebula/build.sh` | 只构建应用镜像 `nebula:1.2.5`（等价 `up.sh --no-*` 的构建部分） |
+| `nebula/build.sh` | 只构建应用镜像 `nebula:1.2.6`（等价 `up.sh --no-*` 的构建部分） |
 | `nebula/selfcheck.py` | 后端自检：配置解析 / 路径穿越防护 / 路由齐全 |
 | `nebula/tools/run_unit_tests.sh` | 前端逻辑单元测试（8 套） |
 | `nebula/tools/run_share_tests.sh` | 分享功能集成测试 |

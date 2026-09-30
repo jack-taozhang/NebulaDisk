@@ -56,6 +56,16 @@ const Explorer = (() => {
       sortKey: localStorage.getItem('nebula.sortKey') || 'name',
       sortAsc: localStorage.getItem('nebula.sortAsc') !== 'false',
       filter: '',
+      // ★ 递归搜索结果（null = 未在搜索）★
+      //   需求（原文）：「网盘文件夹窗口上面的搜索功能 不支持后缀名和子文件夹
+      //   的搜索」。S.filter 那套是**本地即时筛选**（只看当前目录 S.entries），
+      //   这里存的是**后端递归搜索**的结果 —— 两者并存：
+      //     · 输入为纯关键词 → 立刻本地筛（0 延迟，符合直觉）
+      //     · 同时并发请求 /api/search（递归 + 后缀名匹配）
+      //       回来后用 S.search 接管渲染，命中项可来自任意子目录。
+      //   这样既保留了「打字即见」的顺畅，又真的能搜到子文件夹里的东西。
+      search: null,
+      searchSeq: 0,        // 请求序号，防抖后回包的乱序覆盖
       loading: false,
       lastClickIdx: -1,
       infoOpen: false,
@@ -85,7 +95,18 @@ const Explorer = (() => {
       go: (p, o) => navigate(win, S, p, o),
       get path() { return S.path; },
       get mount() { return S.mount; },
-      refresh: () => load(win, S),
+      // ★ 必须传 `win.bodyEl`，不是 `win` ★
+      //   2026-09-30 真机探针抓到的真 bug：原来写的是 `load(win, S)`，
+      //   而 `win` 是 **WM 的窗口状态对象**，`load(body, S)` 要的是渲染用的
+      //   DOM 容器。于是按 F5 会走到
+      //       renderLoading(win, S) → win.querySelector is not a function
+      //   而 `renderLoading` 又在 `try` **之前** ⇒ 异常直接穿出 load()，
+      //   第 684 行刚置上的 `S.loading = true` 永远不会被 finally 复位
+      //   ⇒ 这个资源管理器窗口**从此永久卡在"正在加载…"**（后面所有
+      //   `if (S.loading) return` 全部静默吞掉）。
+      //   修法两条：① 用正确的对象；② 把 renderLoading 挪进 try 里
+      //   （见 load()），让任何渲染异常都不能再造成永久卡死。
+      refresh: () => load(win.bodyEl, S),
     };
 
     // ★ 拖拽上传：把「文件拖进文件夹窗口」接到 actUpload 的上传管线上 ★
@@ -187,8 +208,13 @@ const Explorer = (() => {
             WM.Toolbar.btn('delete', 'trash', '', '', '删除'),
           ],
           right: [
+            // ★ 占位文案必须说清「含子文件夹」★
+            //   老文案是「搜索当前目录…」，而用户报障正是「不支持后缀名和子
+            //   文件夹的搜索」—— 文案本身就在暗示能力边界，会导致用户以为
+            //   搜不到是设计如此。现在真的递归了，文案必须跟上。
             `<div class="searchbox">${Icons.ui('search')}`
-              + `<input type="text" placeholder="搜索当前目录…" data-role="filter"></div>`,
+              + `<input type="text" data-role="filter"`
+              + ` placeholder="搜索（含子文件夹，支持 .pdf / *.pdf）" title="在当前目录及其所有子文件夹中递归搜索；输入 .pdf 或 *.pdf 可按后缀名筛选；空格/逗号分隔多个关键词（任一命中即可）"></div>`,
             WM.Toolbar.sep(),
             WM.Toolbar.btn('view-grid', 'grid', '', 'viewbtn', '图标视图'),
             WM.Toolbar.btn('view-list', 'list', '', 'viewbtn', '列表视图'),
@@ -337,6 +363,15 @@ const Explorer = (() => {
        · 多选时作为一个整体移动；若其中某项非法，只跳过该项并在最后汇总提示。
      ------------------------------------------------------------------ */
   const DND_MIME = 'application/x-nebula-names';
+
+  /** 单次递归搜索请求的页大小。
+   *
+   *  后端 `/api/search` 的 limit 上限就是 `_SEARCH_MAX_HITS = 500`，
+   *  传超过会被 `min()` 夹回 500 —— 所以这里直接写 500，不装模作样传 1000。
+   *  超过 500 条时后端 `hasMore=true`，界面上明确写「仅列出相关度最高的 N 条」，
+   *  不能让用户以为这就是全部（这正是 task24 修 `truncated` 的初衷）。
+   */
+  const SEARCH_PAGE = 500;
 
   /** 记录当前正在拖的条目（跨窗口共享：拖动源窗口写入，目标窗口读取） */
   let dragPayload = null;
@@ -548,9 +583,16 @@ const Explorer = (() => {
 
     const filterInput = q('[data-role="filter"]');
     filterInput.addEventListener('input', debounce(() => {
-      S.filter = filterInput.value.trim().toLowerCase();
-      renderFiles(body, S);
+      applyFilter(body, S, filterInput.value);
     }, 140));
+    // Esc 清空并退出搜索（与 bindKeys 里 Esc 取消选中区分：输入框内优先清搜索）
+    filterInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && filterInput.value) {
+        e.stopPropagation();
+        filterInput.value = '';
+        exitSearch(body, S);
+      }
+    });
 
     // 空白区右键 / 点击取消选中
     const files = q('[data-role="files"]');
@@ -600,6 +642,13 @@ const Explorer = (() => {
       // 输入框 / 可编辑区域里让原生行为优先
       if (e.target.matches('input, textarea, [contenteditable]')) return;
 
+      // ★★ 弹窗开着 → 本窗口一律不吃按键 ★★
+      //   「弹窗开着，后面的窗口还能操作」这条报障，鼠标那半边由
+      //   `.modal-mask` 挡住；键盘这半边必须靠这个判断 ——
+      //   否则链接管理开着按 Delete 就是**真删后面资源管理器里选中的文件**。
+      //   （窗口的 .focused 类在弹窗打开时并不会被摘掉，所以不能靠它。）
+      if (Dialog.isOpen()) return;
+
       const winId = winIdOf(S);
       const st = WM.get(winId);
       if (!st) { document.removeEventListener('keydown', onKey); return; }
@@ -617,9 +666,15 @@ const Explorer = (() => {
         e.preventDefault();
         load(body, S);
       } else if (e.key === 'Escape') {
+        // ★ 搜索态下 Esc 优先「退出搜索」★
+        //   用户按 Esc 的心理预期是「退出当前这个非常规状态」；搜索就是那个
+        //   状态。只有在没搜索时，Esc 才退而求其次去取消选中。
+        if (S.search) { e.preventDefault(); exitSearch(body, S); return; }
         if (!S.selected.size) return;
         S.selected.clear();
         renderFiles(body, S);
+        updateToolbar(body, S);
+        updateStatus(body, S);
       }
     };
     document.addEventListener('keydown', onKey);
@@ -657,8 +712,14 @@ const Explorer = (() => {
 
     S.path = path;
     S.selected.clear();
+    // ★ 换目录必须退出搜索 ★
+    //   搜索结果是「相对某个起始目录」的，换了目录之后那批命中项就失去参照，
+    //   继续显示会让人以为「新目录里也有这些文件」。
+    //   同时把输入框清空 —— 否则框里还留着上次的关键词，看着像没生效。
+    resetSearch(S);
     // 新建窗口时 body 可能还没绑定，需要重新定位元素
     const host = WM.get(winIdOf(S)) ? WM.get(winIdOf(S)).bodyEl : body;
+    clearSearchInput(host);
     load(host, S);
   }
 
@@ -676,15 +737,22 @@ const Explorer = (() => {
     S.hIndex = i;
     S.path = S.history[i].path;
     S.selected.clear();
-    load(body, S);
+    resetSearch(S);          // 同 navigate()：换目录即退出搜索
+    const host = WM.get(winIdOf(S)) ? WM.get(winIdOf(S)).bodyEl : body;
+    clearSearchInput(host);
+    load(host, S);
   }
 
   async function load(body, S) {
     if (S.loading) return;
     S.loading = true;
-    renderLoading(body, S);
 
     try {
+      // ★ renderLoading 必须在 try **里面** ★
+      //   它原来在第 685 行、try 之前 —— 一旦它自己抛异常（例如调用方
+      //   传错对象，见 nav.refresh 的说明），异常会绕过下面的 finally，
+      //   于是 `S.loading` 永久停在 true，这个窗口再也加载不了任何目录。
+      renderLoading(body, S);
       const data = await API.list(S.mount, S.path);
       S.path = data.path || S.path;
       S.entries = data.entries || [];
@@ -808,6 +876,355 @@ const Explorer = (() => {
   /* ======================================================================
      文件列表渲染
      ====================================================================== */
+  /* ======================================================================
+     递归搜索（后端 /api/search）
+
+     需求（原文）：「网盘文件夹窗口上面的搜索功能 不支持后缀名和子文件夹的搜索」
+
+     ★ 为什么光靠本地筛选做不到 ★
+       老实现是 `S.entries.filter((e) => e.name.toLowerCase().includes(q))`：
+         · `S.entries` 只有**当前目录一层** ⇒ 子文件夹里的东西永远搜不到；
+         · `includes` 遇到 `*.pdf` 会原样拿去比对 ⇒ 一个也匹配不上，
+           这就是用户体感里的「不支持后缀名」。
+       而后端 `/api/search`（task24 起）本来就是递归 + 后缀名归一的
+       （`_search_terms` 把 `.pdf` / `*.pdf` 都归一成 `pdf`；`_hit_rank`
+       把扩展名精确命中排在第 3 档，优先级高于子串命中）。
+       所以这里是**把已经存在的能力接上**，不是重写一套搜索。
+
+     ★ 两种态如何切换（避免每敲一个字就闪一次）★
+       · 输入非空且此前不在搜索态 → 先做一次**本地即时筛**（0 延迟反馈），
+         同时并发发递归请求；请求回来后由 `S.search` 接管渲染。
+       · 已在搜索态再改关键词 → **不回落到本地筛**，只把旧结果标记为
+         `loading`（显示「搜索中…」）并保留上批结果，等新结果覆盖。
+         否则列表会在「本地结果 ↔ 服务端结果」之间反复横跳。
+       · 输入清空 / 输入框里按 Esc / 换目录 / 点「退出搜索」→ `resetSearch`
+         回到普通浏览。
+     ====================================================================== */
+
+  /** 选中键：浏览态 = name（同目录内唯一）；搜索态 = 相对挂载根的 path（跨目录唯一）
+   *
+   *  ★ 为什么搜索态必须换键 ★
+   *    `S.selected` 原来存的是**文件名**。搜索结果来自不同子目录，
+   *    `a/readme.md` 与 `b/readme.md` 同名 ⇒ 按名字存会「选中一个，
+   *    两个都高亮」，下载/删除还会指向错误的目录。
+   *    所以搜索态一律用条目自带的 `path`（相对挂载根，`/api/search`
+   *    的每条 hit 都带）作键。
+   */
+  function selKey(S, e) {
+    return S.search ? (e.path || e.name) : e.name;
+  }
+
+  /** 由选中键反解出「相对**挂载根**的完整路径」
+   *
+   *  所有写操作（下载 / 删除 / 重命名 / 移动）都必须走这个函数，
+   *  不能再自己拼 `joinPath(S.path, key)` —— 搜索态下那会指错目录。
+   */
+  function selPath(S, key) {
+    return S.search ? key : joinPath(S.path, key);
+  }
+
+  /** 当前渲染用的列表：搜索态是命中项，浏览态是可见条目 */
+  function curList(S) {
+    return S.search ? (S.search.hits || []) : visibleEntries(S);
+  }
+
+  /** 命中项相对于「搜索起点」的所在目录；就在起点目录里时返回 '' */
+  function relOf(S, e) {
+    if (!S.search) return '';
+    const base = normPath(S.search.base || '/');
+    let p = String(e.path || '');
+    if (!p) return '';
+    if (base !== '/' && p.startsWith(base + '/')) p = p.slice(base.length + 1);
+    else if (p.startsWith('/')) p = p.slice(1);
+    const i = p.lastIndexOf('/');
+    return i < 0 ? '' : p.slice(0, i);
+  }
+
+  /** 只清状态，不碰 DOM（navigate/historyGo 用；之后 load 会整体重渲染） */
+  function resetSearch(S) {
+    S.searchSeq++;          // 在途请求全部作废
+    S.search = null;
+    S.filter = '';
+  }
+
+  function clearSearchInput(body) {
+    const inp = body && body.querySelector
+      ? body.querySelector('[data-role="filter"]') : null;
+    if (inp && inp.value) inp.value = '';
+  }
+
+  /** 退出搜索，回到普通浏览 */
+  function exitSearch(body, S) {
+    resetSearch(S);
+    clearSearchInput(body);
+    renderFiles(body, S);
+    updateStatus(body, S);
+    updateToolbar(body, S);
+  }
+
+  /** 输入变化 → 本地即时筛 + 并发递归搜索 */
+  function applyFilter(body, S, raw) {
+    const q = String(raw == null ? '' : raw).trim();
+    if (!q) { exitSearch(body, S); return; }
+
+    S.filter = q.toLowerCase();
+
+    if (!S.search) {
+      // 首次进入搜索：先给本地筛选结果，用户立刻有反馈
+      renderFiles(body, S);
+    } else if (S.search.q !== q || S.search.base !== S.path) {
+      // 已在搜索态 → 保留上批结果，只标记「正在搜新的」
+      S.search = Object.assign({}, S.search, { q, base: S.path, loading: true });
+      renderFiles(body, S);
+    }
+    runSearch(body, S, q);
+  }
+
+  async function runSearch(body, S, q) {
+    const seq = ++S.searchSeq;
+    const base = S.path;
+    try {
+      const r = await API.search(S.mount, q, base, SEARCH_PAGE, 0);
+      // ★ 乱序保护 ★ 期间用户又改了关键词 / 换了目录 / 退出了搜索 → 丢弃
+      if (seq !== S.searchSeq || S.path !== base) return;
+      S.search = {
+        q,
+        base,
+        hits: r.hits || [],
+        total: r.total || 0,
+        reachable: r.reachable || 0,
+        hasMore: !!r.hasMore,
+        depthCapped: !!r.depthCapped,
+        scanned: r.scanned || 0,
+        terms: r.terms || [],
+        loading: false,
+      };
+    } catch (err) {
+      if (seq !== S.searchSeq) return;
+      // 搜索失败不改产品数据、也不把列表打空：退回本地筛选 + 明确报错
+      S.search = null;
+      renderFiles(body, S);
+      updateStatus(body, S);
+      updateToolbar(body, S);
+      Toast.error('搜索失败', err.message);
+      return;
+    }
+    renderFiles(body, S);
+    updateStatus(body, S);
+    updateToolbar(body, S);
+  }
+
+  /** 打开某项所在位置：跳到它的父目录并选中它 */
+  function revealEntry(body, S, e) {
+    const full = normPath(e.path || '');
+    if (!full || full === '/') { exitSearch(body, S); return; }
+    const dir = parentPath(full);
+    const nm = baseName(full);
+    resetSearch(S);
+    clearSearchInput(body);
+    navigate(body, S, dir, { push: true });
+    // navigate 会异步 load；选中要在列表渲染出来之后落
+    setTimeout(() => {
+      S.selected.clear();
+      S.selected.add(nm);
+      renderFiles(body, S);
+      updateToolbar(body, S);
+      updateStatus(body, S);
+    }, 0);
+  }
+
+  function searchItemMenu(body, S, x, y, e) {
+    const items = [
+      { label: '打开', icon: e.isDir ? 'folder' : 'eye',
+        onClick: () => activate(body, S, e) },
+      { label: '打开所在位置', icon: 'folder', accel: 'Ctrl+Enter',
+        onClick: () => revealEntry(body, S, e) },
+    ];
+    if (!e.isDir) {
+      items.push({ sep: true });
+      items.push({
+        label: '下载', icon: 'download',
+        onClick: () => downloadPaths(body, S, [e.path || '']),
+      });
+      items.push({
+        label: '复制路径', icon: 'copy',
+        onClick: () => {
+          const t = e.path || '';
+          navigator.clipboard && navigator.clipboard.writeText(t)
+            .then(() => Toast.ok('已复制路径', t))
+            .catch(() => Toast.info('路径', t));
+        },
+      });
+    }
+    ContextMenu.show(x, y, items);
+  }
+
+  function renderSearchResults(wrap, body, S) {
+    const hits = S.search.hits || [];
+    const baseLabel = (S.search.base && S.search.base !== '/')
+      ? S.search.base : S.mount;
+
+    const head = `
+      <div class="search-head">
+        <span class="sh-sum">
+          ${Icons.ui('search', 14)}
+          在「<b title="${esc(baseLabel)}">${esc(baseLabel)}</b>」及其子文件夹下
+          找到 <b>${S.search.total}</b> 个匹配项
+          ${S.search.hasMore
+            ? `<em class="sh-note">仅列出相关度最高的 ${hits.length} 条</em>` : ''}
+          ${S.search.depthCapped
+            ? '<em class="sh-note">目录过深，未全部扫描</em>' : ''}
+          ${S.search.loading ? '<em class="sh-note sh-busy">搜索中…</em>' : ''}
+        </span>
+        <span class="sh-acts">
+          <!-- ★ 刻意**不用** class="tbtn" ★
+               那是 WM.Toolbar.btn 的模板专属类，重名会被
+               _test_drag_buttons.js §12 判为「手写业务按钮 → 与工具栏模板漂移」，
+               而且 .tbtn 的尺寸/间距是按工具栏 29px 高设计的，
+               塞进这条汇总条里会把行高撑歪。这里用自己的 .sh-btn。 -->
+          <button class="sh-btn" data-role="search-exit" title="回到普通浏览（Esc）">
+            ${Icons.ui('close', 13)}<span>退出搜索</span>
+          </button>
+        </span>
+      </div>`;
+
+    if (!hits.length) {
+      wrap.innerHTML = head + `<div class="state-box">
+        ${Icons.ui('search', 56)}
+        <div class="sb-title">没有匹配项</div>
+        <div class="sb-hint">
+          已扫描 ${S.search.scanned} 个项目。按后缀名找文件可以直接输入
+          <code>.pdf</code> 或 <code>*.pdf</code>；多个关键词用空格分隔（任一命中即可）。
+        </div>
+      </div>`;
+    } else {
+      wrap.innerHTML = head + `
+        <table class="list-view search-view">
+          <thead><tr>
+            <th style="width:34%">名称</th>
+            <th style="width:32%">所在位置</th>
+            <th style="width:150px">修改日期</th>
+            <th class="num" style="width:100px">大小</th>
+            <th style="width:36px"></th>
+          </tr></thead>
+          <tbody>${hits.map((e, i) => {
+            const rel = relOf(S, e);
+            const key = selKey(S, e);
+            return `
+            <tr class="${S.selected.has(key) ? 'selected' : ''}"
+                data-i="${i}" data-key="${esc(key)}">
+              <td class="cell-name" title="${esc(e.path || e.name)}">
+                ${listThumb(e, S)}
+                <span>${esc(e.name)}</span>
+              </td>
+              <td class="cell-loc">
+                <button class="loc-link" data-loc="${i}"
+                        title="打开所在位置：${esc(rel || baseLabel)}">
+                  ${Icons.ui('folder', 13)}
+                  <span>${esc(rel || '（当前目录）')}</span>
+                </button>
+              </td>
+              <td>${esc(fmtTime(e.mtime))}</td>
+              <td class="num">${e.isDir ? '' : esc(fmtSize(e.size))}</td>
+              <td class="num">${e.isDir ? '' : `
+                <button class="row-dl" data-dl="${i}" title="下载这个文件">
+                  ${Icons.ui('download', 14)}
+                </button>`}</td>
+            </tr>`;
+          }).join('')}</tbody>
+        </table>`;
+    }
+
+    // 退出搜索
+    const exitBtn = wrap.querySelector('[data-role="search-exit"]');
+    if (exitBtn) exitBtn.addEventListener('click', () => exitSearch(body, S));
+
+    // 打开所在位置（按钮命中优先，别被行的单击选中吃掉）
+    wrap.querySelectorAll('[data-loc]').forEach((b) => {
+      b.addEventListener('mousedown', (ev) => ev.stopPropagation());
+      b.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        revealEntry(body, S, hits[+b.dataset.loc]);
+      });
+    });
+
+    // 行内下载
+    wrap.querySelectorAll('[data-dl]').forEach((b) => {
+      b.addEventListener('mousedown', (ev) => ev.stopPropagation());
+      b.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        downloadPaths(body, S, [hits[+b.dataset.dl].path || '']);
+      });
+    });
+
+    // 行交互：单击选中（用 path 作键）、双击打开、右键菜单
+    wrap.querySelectorAll('tr[data-i]').forEach((tr) => {
+      const idx = +tr.dataset.i;
+      const e = hits[idx];
+      const key = selKey(S, e);
+
+      tr.addEventListener('mousedown', (ev) => {
+        if (ev.button !== 0) return;
+        if (ev.ctrlKey || ev.metaKey) {
+          S.selected.has(key) ? S.selected.delete(key) : S.selected.add(key);
+        } else if (ev.shiftKey && S.lastClickIdx >= 0) {
+          const a = Math.min(S.lastClickIdx, idx), b = Math.max(S.lastClickIdx, idx);
+          for (let i = a; i <= b; i++) S.selected.add(selKey(S, hits[i]));
+        } else {
+          S.selected.clear();
+          S.selected.add(key);
+        }
+        S.lastClickIdx = idx;
+        wrap.querySelectorAll('tr[data-key]').forEach((n) => {
+          n.classList.toggle('selected', S.selected.has(n.dataset.key));
+        });
+        updateToolbar(body, S);
+        updateStatus(body, S);
+      });
+
+      tr.addEventListener('dblclick', (ev) => {
+        ev.preventDefault();
+        activate(body, S, e);
+      });
+
+      tr.addEventListener('contextmenu', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (!S.selected.has(key)) {
+          S.selected.clear();
+          S.selected.add(key);
+          wrap.querySelectorAll('tr[data-key]').forEach((n) => {
+            n.classList.toggle('selected', S.selected.has(n.dataset.key));
+          });
+          updateToolbar(body, S);
+          updateStatus(body, S);
+        }
+        searchItemMenu(body, S, ev.clientX, ev.clientY, e);
+      });
+    });
+  }
+
+  /** 按「相对挂载根的路径」批量下载（搜索态唯一安全的下载方式） */
+  function downloadPaths(body, S, paths) {
+    const list = (paths || []).filter(Boolean);
+    if (!list.length) return;
+    list.forEach((p, i) => {
+      setTimeout(() => {
+        const a = document.createElement('a');
+        a.href = API.downloadUrl(S.mount, p);
+        a.download = baseName(p) || 'download';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      }, i * 400);
+    });
+    if (list.length > 1) {
+      Toast.info('开始下载', `${list.length} 个文件，浏览器可能询问保存位置`);
+    }
+  }
+
   function visibleEntries(S) {
     let list = S.entries;
     if (S.filter) {
@@ -830,6 +1247,13 @@ const Explorer = (() => {
 
   function renderFiles(body, S) {
     const wrap = body.querySelector('[data-role="files"]');
+    if (!wrap) return;
+
+    // ★ 搜索态走独立渲染器 ★
+    //   不能复用 renderList：搜索结果的「所在位置」列、行内下载、以及
+    //   「选中键是 path 而不是 name」这几条都和普通列表不同。
+    if (S.search) { renderSearchResults(wrap, body, S); return; }
+
     const list = visibleEntries(S);
 
     if (!list.length) {
@@ -846,10 +1270,13 @@ const Explorer = (() => {
 
   function emptyState(S) {
     if (S.filter) {
+      // ★ 这里只代表「本地筛选没命中」★
+      //   递归搜索正在进行 / 已失败时会走到这里，所以文案不能写死
+      //   「未找到匹配项」—— 那会让用户在结果还没回来时就以为搜完了。
       return `<div class="state-box">
         ${Icons.ui('search', 56)}
-        <div class="sb-title">未找到匹配项</div>
-        <div class="sb-hint">没有名称包含「${esc(S.filter)}」的文件或文件夹</div>
+        <div class="sb-title">当前目录没有匹配项</div>
+        <div class="sb-hint">正在这个文件夹及其子文件夹里继续查找「${esc(S.filter)}」…</div>
       </div>`;
     }
     return `<div class="state-box">
@@ -882,8 +1309,9 @@ const Explorer = (() => {
   /* ---------------- 网格视图 ---------------- */
   function renderGrid(wrap, body, S, list) {
     wrap.innerHTML = `<div class="grid-view">${list.map((e, i) => `
-      <div class="tile ${S.selected.has(e.name) ? 'selected' : ''}"
-           data-name="${esc(e.name)}" data-i="${i}" title="${esc(e.name)}"
+      <div class="tile ${S.selected.has(selKey(S, e)) ? 'selected' : ''}"
+           data-name="${esc(e.name)}" data-key="${esc(selKey(S, e))}"
+           data-i="${i}" title="${esc(e.name)}"
            draggable="true">
         <span class="tile-img">${tileImg(e, S)}</span>
         <span class="tile-name">${esc(e.name)}</span>
@@ -914,9 +1342,12 @@ const Explorer = (() => {
   function imgUrl(e, S) {
     S = S || state.cur;        // 兜底：理论上传参一定给，这里只是防御
     if (!S) return '';         // 再兜一层，绝不因缩略图把整个列表搞崩
-    const q = new URLSearchParams({
-      mount: S.mount, path: joinPath(S.path, e.name), inline: 'true',
-    });
+    // ★ 搜索态必须用条目自带的完整相对路径 ★
+    //   搜索结果的 e.name 只是文件名，真正的目录在 e.path 里；
+    //   继续用 joinPath(S.path, e.name) 会指向「当前目录下的同名文件」
+    //   —— 要么 404 破图，要么（更糟）显示了**另一个**文件的缩略图。
+    const p = (S.search && e.path) ? e.path : joinPath(S.path, e.name);
+    const q = new URLSearchParams({ mount: S.mount, path: p, inline: 'true' });
     return '/api/download?' + q.toString();
   }
 
@@ -936,8 +1367,9 @@ const Explorer = (() => {
         </tr></thead>
         <tbody>
           ${list.map((e, i) => `
-            <tr class="${S.selected.has(e.name) ? 'selected' : ''}"
-                data-name="${esc(e.name)}" data-i="${i}" draggable="true">
+            <tr class="${S.selected.has(selKey(S, e)) ? 'selected' : ''}"
+                data-name="${esc(e.name)}" data-key="${esc(selKey(S, e))}"
+                data-i="${i}" draggable="true">
               <td class="cell-name">
                 ${listThumb(e, S)}
                 <span title="${esc(e.name)}">${esc(e.name)}</span>
@@ -966,6 +1398,9 @@ const Explorer = (() => {
     if (e.isDir) return Icons.file(null, true);
     const kind = EXT_KIND[(e.ext || '').toLowerCase()];
     if (kind === 'image' && e.size < 12 * 1024 * 1024) {
+      // ★ imgUrl 必须能识别搜索态 ★
+      //   搜索命中项可能来自任意子目录，用 joinPath(S.path, e.name) 拼会
+      //   指向错误的路径（缩略图全变破图）。imgUrl 内部已按 S.search 分流。
       return `<img class="row-thumb" loading="lazy" src="${esc(imgUrl(e, S))}" alt="">`;
     }
     // 列表里图标尺寸小，复用同一套彩色图标即可
@@ -986,14 +1421,18 @@ const Explorer = (() => {
 
       node.addEventListener('mousedown', (ev) => {
         if (ev.button !== 0) return;
+        // ★ 选中键走 selKey() ★
+        //   浏览态就是文件名；万一将来也在搜索态复用这个绑定，
+        //   它会自动换成 path，不会把不同子目录里的同名文件一起选中。
         if (ev.ctrlKey || ev.metaKey) {
-          S.selected.has(e.name) ? S.selected.delete(e.name) : S.selected.add(e.name);
+          const k = selKey(S, e);
+          S.selected.has(k) ? S.selected.delete(k) : S.selected.add(k);
         } else if (ev.shiftKey && S.lastClickIdx >= 0) {
           const a = Math.min(S.lastClickIdx, idx), b = Math.max(S.lastClickIdx, idx);
-          for (let i = a; i <= b; i++) S.selected.add(list[i].name);
+          for (let i = a; i <= b; i++) S.selected.add(selKey(S, list[i]));
         } else {
           S.selected.clear();
-          S.selected.add(e.name);
+          S.selected.add(selKey(S, e));
         }
         S.lastClickIdx = idx;
         syncSelection(wrap, S);
@@ -1022,7 +1461,8 @@ const Explorer = (() => {
       //         否则只拖这一项（此时上面的 mousedown 已把选中集重置为它）。
       node.addEventListener('dragstart', (ev) => {
         if (S.mountReadonly) { ev.preventDefault(); return; }
-        const names = S.selected.has(e.name) && S.selected.size
+        const k = selKey(S, e);
+        const names = S.selected.has(k) && S.selected.size
           ? [...S.selected]
           : [e.name];
 
@@ -1048,9 +1488,9 @@ const Explorer = (() => {
       node.addEventListener('contextmenu', (ev) => {
         ev.preventDefault();
         ev.stopPropagation();
-        if (!S.selected.has(e.name)) {
+        if (!S.selected.has(selKey(S, e))) {
           S.selected.clear();
-          S.selected.add(e.name);
+          S.selected.add(selKey(S, e));
           syncSelection(wrap, S);
           updateToolbar(body, S);
           updateStatus(body, S);
@@ -1061,17 +1501,41 @@ const Explorer = (() => {
   }
 
   function syncSelection(wrap, S) {
-    wrap.querySelectorAll('[data-name]').forEach((n) => {
-      n.classList.toggle('selected', S.selected.has(n.dataset.name));
+    wrap.querySelectorAll('[data-key]').forEach((n) => {
+      n.classList.toggle('selected', S.selected.has(n.dataset.key));
     });
   }
 
-  /** 双击行为：文件夹 → 新开一个文件夹窗口；文件 → 按路由打开预览器 */
+  /** 双击行为：文件夹 → 进入该目录；文件 → 按路由打开预览器 */
   function activate(body, S, e) {
     if (e.isDir) {
+      // ★ 搜索态：直接进入命中的那个目录 ★
+      //   命中项的 `path` 就是「相对挂载根的完整路径」，直接 navigate 即可，
+      //   不能再走 openChild(body, S, e.name) —— 那会拼成
+      //   `joinPath(S.path, name)`，指的是**当前目录下的同名文件夹**（多半不存在）。
+      if (S.search) {
+        const target = normPath(e.path || '');
+        resetSearch(S);
+        clearSearchInput(body);
+        navigate(body, S, target || '/', { push: true });
+        return;
+      }
       openChild(body, S, e.name);
       return;
     }
+
+    // ★ 搜索态：不退出搜索（用户多半还要接着看下一条命中）★
+    //   翻页上下文只给这一条：命中项来自不同子目录，把整批命中当成
+    //   「同级文件列表」会让「下一个」从 /a/x.pdf 跳到 /b/y.pdf，
+    //   位置计数也变成无意义的「第 3 / 87」。dirPath 取它的真实父目录，
+    //   这样后续 explorer 载入该目录时 refreshContext 还能正确接手。
+    if (S.search) {
+      const full = normPath(e.path || '');
+      if (!full || full === '/') return;
+      Viewer.open(S.mount, full, e, [e], parentPath(full));
+      return;
+    }
+
     // ★ 把「当前目录 + 同级可预览文件列表 + 目录路径」一并交给预览窗口 ★
     //   只有这样预览窗口才能实现「上一个 / 下一个文件」（与表格里的顺序一致），
     //   并在翻页时**原地换内容**而不是新开窗口。
@@ -1391,22 +1855,106 @@ const Explorer = (() => {
     { v: 0, t: '永久有效' },
   ];
 
-  async function actShare(body, S, entry) {
-    // entry._selfPath 存在 → 分享的是「当前目录自身」（空白处右键进来的）
-    //   否则 → 分享选中条目（S.path + name）
-    const rel = entry._selfPath !== undefined
-      ? entry._selfPath
-      : joinPath(S.path, entry.name);
-    const dlg = Dialog.custom({ title: '分享', wide: true, maskClose: false });
+  /* ---------------------------------------------------------------- 分享 */
 
-    dlg.el.innerHTML = `
+  /**
+   * ★★ 一个目标只留一条分享（2026-10-01 用户要求）★★
+   *
+   * 用户报障（原话 + 截图：同一个 `天津康希诺提升机图纸.dwg` 在链接管理里
+   * 并排出现两条 `/s/…`）：
+   *
+   *   「同一个文件目前可以分享多个路径，这样调整为同一个文件只能分享一个
+   *    路径，直连一个路径。」
+   *
+   * 后端已经用**部分唯一索引 + 幂等创建**兜住了（见 app/shortlink.py 顶部），
+   * 前端这一层的责任是：**别再制造"看起来像新建"的交互**。
+   * 所以打开对话框时先查这个目标上有没有链接 ——
+   *
+   *   有分享 → 直接把它显示出来（并带上直链），主按钮换成「编辑分享设置…」；
+   *   没有   → 才是「创建链接」表单。
+   *
+   * ⚠️ 查失败（接口异常 / 老后端）要**静默降级**成表单：
+   *    创建本身是幂等的（后端会把参数写到已有那条上），
+   *    绝不会因为这里多走一步而多出一条链接。
+   */
+  const normRel = (p) => String(p == null ? '' : p)
+    .replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '').replace(/\/+$/, '');
+
+  /**
+   * ★ 防连点（2026-10-01）★
+   *
+   * ⚠️ 这个 `let` 必须**和 actShare 在同一个作用域**里。
+   *    实测事故：只加了 `if (shareBusy) return;` 和 `shareBusy = true;`
+   *    却漏了这行声明 ⇒ `actShare` 第一句就
+   *       `ReferenceError: shareBusy is not defined`
+   *    （读未声明的标识符直接抛，不像赋值会自动建全局）
+   *    ⇒ 右键「分享」**点了完全没反应**（异常在 onClick 里被吞掉）。
+   *    这条是用户报的「右键的分享功能不能用了」的真因。
+   *    —— 教训：`grep 标识符` 时**只看引用不看声明**等于没查；
+   *       新引入的模块级变量一定要 grep 出 `let/const/var` 那一行。
+   */
+  let shareBusy = false;
+
+  /** 查这个目标上已有的链接。失败返回 {}，**绝不抛**。 */
+  async function lookupLinks(mount, rel) {
+    try {
+      const r = await API.links();
+      const items = (r && r.items) || [];
+      const want = normRel(rel);
+      const hit = (kind) => items.find((x) => x.kind === kind
+        && x.mount === mount && normRel(x.path) === want);
+      return { share: hit('share'), file: hit('file') };
+    } catch (e) {
+      return {};
+    }
+  }
+
+  /** 有效期 / 提取码 / 次数 这三项的说明文字（结果区与已有态共用） */
+  function shareHintText(sh) {
+    return [
+      sh.hasPassword ? '需要提取码' : '无需提取码',
+      sh.expiresAt
+        ? `有效期至 ${new Date(sh.expiresAt * 1000).toLocaleDateString()}`
+        : '永久有效',
+      sh.maxVisits ? `限 ${sh.maxVisits} 次访问` : '不限次数',
+    ].join(' · ');
+  }
+
+  /** 直链那一段的说明文字 */
+  function directHintText(d) {
+    // ★ 直链默认 7 天 ⇒ 必须把失效时间告诉用户 ★
+    //   否则他 7 天后发现链接打不开，只会以为"坏了"。
+    return d.expiresAt
+      ? `有效至 ${new Date(d.expiresAt * 1000).toLocaleString()}`
+        + '（可在「链接管理」里续期或改为永久）'
+      : '永久有效（可在「链接管理」里撤销）';
+  }
+
+  async function actShare(body, S, entry) {
+    // 防连点：下面要 await 一次网络请求，不拦会开出两个对话框。
+    if (shareBusy) return;
+    shareBusy = true;
+    try {
+      // entry._selfPath 存在 → 分享的是「当前目录自身」（空白处右键进来的）
+      //   否则 → 分享选中条目（S.path + name）
+      const rel = entry._selfPath !== undefined
+        ? entry._selfPath
+        : joinPath(S.path, entry.name);
+
+      // ★ 先查有没有已存在的链接：这是"一个目标一条分享"的前端落点 ★
+      const exist = await lookupLinks(S.mount, rel);
+
+      const dlg = Dialog.custom({ title: '分享', wide: true, maskClose: false });
+
+      dlg.el.innerHTML = `
       <div class="share-dlg">
         <div class="share-target">
           <div class="share-tname">${esc(entry.name)}</div>
-          <div class="share-tsub">${entry.isDir ? '文件夹（访客可只读浏览）' : '文件'}</div>
+          <div class="share-tsub" data-role="tsub">${entry.isDir
+            ? '文件夹（访客可只读浏览）' : '文件'}</div>
         </div>
 
-        <div class="share-opts">
+        <div class="share-opts" data-role="opts">
           <label class="share-opt">
             <span>有效期</span>
             <select data-role="ttl">
@@ -1436,6 +1984,9 @@ const Explorer = (() => {
           </label>
         </div>
 
+        <!-- 「已有分享」态：不动表单，直接把用户引到同一个编辑器 -->
+        <div class="share-hint" data-role="reuse" hidden></div>
+
         <div class="share-result" data-role="result" hidden>
           <!-- ★ 顺序：直链 → 分享链接（用户要求换位）★
                直链是"立刻能用、默认 7 天"的那条，放上面；分享链接带落地页与
@@ -1459,92 +2010,152 @@ const Explorer = (() => {
           </div>
 
           <div class="share-hint" style="margin-top:12px">
-            两者都指向同一个文件，但语义不同：直链免登录、直接吐字节、
-            <b>默认 7 天有效</b>；分享链接有落地页、可设提取码与次数。
-            续期 / 改成永久 / 撤销都在「链接管理」里。
+            同一个目标只会有一条分享与一条直链 —— 重复创建不会多出地址，
+            而是把设置写到同一条上（**地址保持不变**，已发出去的链接继续有效）。
+            续期 / 改成永久 / 换地址 / 撤销都在「链接管理」里。
           </div>
+        </div>
       </div>`;
 
-    dlg.foot.innerHTML = `
+      // ★ 底部按钮顺序：**「关闭」放最右**（2026-10-01 用户要求）★
+      //   用户原话（两句要一起看）：
+      //     · 「这两个窗口 关闭按钮 改到右边」
+      //     · 「保存 都放在 最右侧」
+      //   合起来的规则：
+      //     ① 「关闭」类按钮不能甩在最左，要落在**右侧那一组**里；
+      //     ② 主按钮（保存 / 创建链接）**仍然压在最右**。
+      //   本弹窗在"已有分享"态下主按钮（创建链接）会被隐藏，剩下的
+      //   `[编辑分享设置…] [关闭]` 里「关闭」就是唯一的主按钮 ⇒ 让它最右；
+      //   在"新建"态下则是 `[关闭] [创建链接]` —— 创建链接压最右。
+      //   ⚠️ 所以这里**不是**简单地"关闭永远最右"，而是：
+      //      关闭排在主按钮之后，主按钮本来就最右。
+      //      links.js 的「编辑分享设置」弹窗（`[取消] [保存]`）遵循同一规则，
+      //      两处要一起看，改一处就得改另一处。
+      dlg.foot.innerHTML = `
       <button class="btn" data-role="manage" style="margin-right:auto">管理我的链接…</button>
-      <button class="btn" data-role="close">关闭</button>
-      <button class="btn primary" data-role="create">创建链接</button>`;
+      <button class="btn" data-role="edit" hidden>编辑分享设置…</button>
+      <button class="btn" data-role="create">创建链接</button>
+      <button class="btn" data-role="close">关闭</button>`;
 
-    const q = (r) => dlg.el.querySelector(`[data-role="${r}"]`);
-    const resBox = q('result');
+      const q = (r) => dlg.el.querySelector(`[data-role="${r}"]`);
+      const resBox = q('result');
+      const optsBox = q('opts');
+      const reuseBox = q('reuse');
+      const tsub = q('tsub');
+      const createBtn = dlg.foot.querySelector('[data-role="create"]');
+      const editBtn = dlg.foot.querySelector('[data-role="edit"]');
 
-    dlg.foot.querySelector('[data-role="close"]').onclick = () => dlg.close();
-    dlg.foot.querySelector('[data-role="manage"]').onclick = () => {
-      dlg.close();
-      LinkManager.open();
-    };
+      dlg.foot.querySelector('[data-role="close"]').onclick = () => dlg.close();
+      dlg.foot.querySelector('[data-role="manage"]').onclick = () => {
+        dlg.close();
+        LinkManager.open();
+      };
 
-    const copyFrom = async (input, label) => {
-      try {
-        await navigator.clipboard.writeText(input.value);
-        Toast.ok('已复制', label || '链接已复制到剪贴板');
-      } catch {
-        // 剪贴板被拒（非 HTTPS / 权限）：退回"选中让用户自己复制"
-        input.select();
-        Toast.info('请手动复制', '浏览器拒绝了剪贴板访问，已为你全选');
-      }
-    };
-
-    q('copy').onclick = () => copyFrom(q('link'));
-    q('dcopy').onclick = () => copyFrom(q('direct'), '直链已复制');
-
-    dlg.foot.querySelector('[data-role="create"]').onclick = async (ev) => {
-      const btn = ev.currentTarget;
-      btn.disabled = true;
-      try {
-        const r = await API.shareCreate(S.mount, rel, {
-          ttlDays: Number(q('ttl').value),
-          maxVisits: Number(q('visits').value),
-          password: q('pw').value.trim(),
-          note: q('note').value.trim(),
-        });
-        const sh = r.share || {};
-
-        // ★ 先把「直链」取回来再一次性渲染（只对文件；目录没有直链）★
-        //   顺序换位后直链在上面，如果先显示分享链接、直链再异步补上，
-        //   用户会看到上方先空一格再"跳"出来 —— 观感很差。所以先取后画。
-        //   ⚠️ 失败要**静默**：后端没这功能（旧版）时只隐藏那一块，
-        //      分享本身已经建好了，不该因为"附赠品"拿不到而弹红。
-        let direct = null;
-        if (!entry.isDir) {
-          try { direct = await API.shortlink(S.mount, rel); } catch { direct = null; }
+      const copyFrom = async (input, label) => {
+        try {
+          await navigator.clipboard.writeText(input.value);
+          Toast.ok('已复制', label || '链接已复制到剪贴板');
+        } catch {
+          // 剪贴板被拒（非 HTTPS / 权限）：退回"选中让用户自己复制"
+          input.select();
+          Toast.info('请手动复制', '浏览器拒绝了剪贴板访问，已为你全选');
         }
+      };
 
-        resBox.hidden = false;
-        q('link').value = sh.url || `${location.origin}/s/${sh.token}`;
-        q('hint').textContent = [
-          sh.hasPassword ? '需要提取码' : '无需提取码',
-          sh.expiresAt ? `有效期至 ${new Date(sh.expiresAt * 1000).toLocaleDateString()}` : '永久有效',
-          sh.maxVisits ? `限 ${sh.maxVisits} 次访问` : '不限次数',
-        ].join(' · ');
+      q('copy').onclick = () => copyFrom(q('link'));
+      q('dcopy').onclick = () => copyFrom(q('direct'), '直链已复制');
 
+      /** 画直链那一块（目录没有直链 → 整块隐藏） */
+      function paintDirect(d) {
         const dw = q('directwrap');
         dw.hidden = true;
-        if (direct && direct.url) {
-          q('direct').value = direct.url;
-          // ★ 直链默认 7 天 ⇒ 必须把失效时间告诉用户 ★
-          //   否则他 7 天后发现链接打不开，只会以为"坏了"。
-          q('dhint').textContent = direct.expiresAt
-            ? `有效至 ${new Date(direct.expiresAt * 1000).toLocaleString()}`
-              + '（可在「链接管理」里续期或改为永久）'
-            : '永久有效（可在「链接管理」里撤销）';
-          dw.hidden = false;
-        }
-        btn.textContent = '重新创建';
-        btn.disabled = false;
-        Toast.ok('已创建分享', '链接已生成');
-      } catch (e) {
-        btn.disabled = false;
-        Toast.error('创建分享失败', e.message);
-      } finally {
-        btn.disabled = false;
+        if (!d || !d.url) return;
+        q('direct').value = d.url;
+        q('dhint').textContent = directHintText(d);
+        dw.hidden = false;
       }
-    };
+
+      /**
+       * 画结果区。
+       *   how = 'existing' 打开时就已有分享（不给创建按钮，指向链接管理）
+       *         'created'  刚新建（同一个对话框里可以继续改设置再保存）
+       *         'reused'   刚把参数写到了已有那条上（地址没变）
+       */
+      function paint(sh, direct, how) {
+        resBox.hidden = false;
+        q('link').value = sh.url || `${location.origin}/s/${sh.token}`;
+        q('hint').textContent = shareHintText(sh);
+        paintDirect(direct);
+
+        if (how === 'existing') {
+          optsBox.hidden = true;
+          createBtn.hidden = true;
+          editBtn.hidden = false;
+          tsub.textContent = `${entry.isDir ? '文件夹' : '文件'} · 已有一条分享`;
+          reuseBox.hidden = false;
+          reuseBox.innerHTML =
+            '<b>这个目标已经有一条分享</b>，不会再建第二条。'
+            + '要改有效期 / 提取码 / 次数上限，用下面的<b>「编辑分享设置…」</b>；'
+            + '要换一条新地址（旧地址立即失效），去「链接管理 → 更新分享地址」。';
+          editBtn.onclick = () => {
+            dlg.close();
+            LinkManager.edit(sh);
+          };
+        } else {
+          tsub.textContent = `${entry.isDir ? '文件夹' : '文件'} · `
+            + (how === 'reused' ? '已更新' : '已创建');
+          reuseBox.hidden = false;
+          reuseBox.innerHTML = how === 'reused'
+            ? '这个目标已经有分享，本次设置已<b>写在这条上</b>（地址没有变）。'
+            : '已创建。同一个目标只会有一条分享：下次再改设置会写在<b>同一条</b>上。';
+          createBtn.textContent = '保存设置';
+        }
+      }
+
+      // ---- 打开时：已有分享就直接展示（这是"一个文件一条分享"的入口责任）----
+      if (exist.share) {
+        paint(exist.share, exist.file
+          || (entry.isDir ? null : { url: `${location.origin}`
+            + API.downloadUrl(S.mount, rel) }), 'existing');
+      }
+
+      createBtn.onclick = async (ev) => {
+        const btn = ev.currentTarget;
+        btn.disabled = true;
+        try {
+          const r = await API.shareCreate(S.mount, rel, {
+            ttlDays: Number(q('ttl').value),
+            maxVisits: Number(q('visits').value),
+            password: q('pw').value.trim(),
+            note: q('note').value.trim(),
+          });
+          const sh = r.share || {};
+
+          // ★ 先把「直链」取回来再一次性渲染（只对文件；目录没有直链）★
+          //   顺序换位后直链在上面，如果先显示分享链接、直链再异步补上，
+          //   用户会看到上方先空一格再"跳"出来 —— 观感很差。所以先取后画。
+          //   ⚠️ 失败要**静默**：后端没这功能（旧版）时只隐藏那一块，
+          //      分享本身已经建好了，不该因为"附赠品"拿不到而弹红。
+          let direct = null;
+          if (!entry.isDir) {
+            try { direct = await API.shortlink(S.mount, rel); } catch { direct = null; }
+          }
+
+          paint(sh, direct, r.reused ? 'reused' : 'created');
+          if (r.reused) {
+            Toast.ok('已更新这条分享', '地址没有变，已发出的链接继续有效');
+          } else {
+            Toast.ok('已创建分享', '链接已生成');
+          }
+        } catch (e) {
+          Toast.error('创建分享失败', e.message);
+        } finally {
+          btn.disabled = false;
+        }
+      };
+    } finally {
+      shareBusy = false;
+    }
   }
 
   async function uploadFiles(body, S, files) {
@@ -1747,7 +2358,13 @@ const Explorer = (() => {
   }
 
   function actDownload(body, S) {
-    downloadSelected(body, S, [...S.selected]);
+    const keys = [...S.selected];
+    if (!keys.length) return;
+    // ★ 搜索态必须按「相对挂载根的路径」下载 ★
+    //   搜索结果的选中键本来就是 path（见 selKey），而 downloadSelected
+    //   会再拼一次 S.path ⇒ 得到 `/当前目录/a/b.txt` 这种错路径。
+    if (S.search) { downloadPaths(body, S, keys); return; }
+    downloadSelected(body, S, keys);
   }
 
   function downloadSelected(body, S, names) {
@@ -1998,10 +2615,32 @@ const Explorer = (() => {
     // ★ 业务按钮的属性是 data-a（由 WM.Toolbar.btn 生成）★
     //   别写成 data-act —— 那是**窗口三键**的专属标记，
     //   两者故意分开（见 renderShell 里的说明）。
-    const set = (act, on) => {
+    //
+    //   title0 记录按钮出厂 title：禁用时改写成禁用原因，重新启用时要还回去，
+    //   否则会残留上一次的「无法重命名」提示（曾造成“按钮明明可用却写着禁用”）。
+    const set = (act, on, why) => {
       const b = body.querySelector(`[data-a="${act}"]`);
-      if (b) b.disabled = !on;
+      if (!b) return;
+      if (b.dataset.title0 === undefined) b.dataset.title0 = b.title || '';
+      b.disabled = !on;
+      b.title = on ? b.dataset.title0 : (why || b.dataset.title0);
     };
+
+    // ★★ 搜索态：写操作一律禁用 ★★
+    //   重命名 / 删除 / 移动 / 新建 / 上传 的语义都是「在**当前浏览目录**里
+    //   对选中的名字做操作」（内部一律 `joinPath(S.path, key)`）。
+    //   而搜索结果的选中键是「相对挂载根的路径」，两者语义不匹配 ——
+    //   照旧执行就会指向错误的位置（轻则 404，重则删掉别的目录里的同名文件）。
+    //   要改搜索结果里的文件，先「打开所在位置」再操作，这是一步明确动作。
+    if (S.search) {
+      set('rename', false, '搜索状态下不能重命名，请先「打开所在位置」');
+      set('delete', false, '搜索状态下不能删除，请先「打开所在位置」');
+      set('new-menu', false, '搜索状态下不提供新建');
+      set('upload', false, '搜索状态下不提供上传');
+      set('download', n >= 1);
+      return;
+    }
+
     set('rename', n === 1);
     set('download', n >= 1);
     set('delete', n >= 1);
@@ -2009,8 +2648,7 @@ const Explorer = (() => {
     // 只读挂载时禁用所有写操作
     if (S.mountReadonly) {
       ['new-menu', 'upload', 'rename', 'delete'].forEach((a) => {
-        const b = body.querySelector(`[data-a="${a}"]`);
-        if (b) { b.disabled = true; b.title = '该目录为只读挂载'; }
+        set(a, false, '该目录为只读挂载');
       });
     }
   }
@@ -2019,6 +2657,25 @@ const Explorer = (() => {
     const c = body.querySelector('[data-role="st-count"]');
     const s = body.querySelector('[data-role="st-sel"]');
     if (!c) return;
+
+    // ★ 搜索态：状态栏说的是「搜了什么 / 命中多少 / 扫了多少」★
+    //   不能继续报「N 个项目」—— 那是当前目录的条目数，和搜索结果无关，
+    //   用户会以为搜索没生效。
+    if (S.search) {
+      c.textContent = `搜索「${S.search.q}」· 命中 ${S.search.total} 项`
+        + (S.search.hasMore ? `（仅列出前 ${S.search.hits.length} 项）` : '')
+        + ` · 已扫描 ${S.search.scanned} 个项目`
+        + (S.search.depthCapped ? ' · 目录过深未扫完' : '')
+        + (S.mountReadonly ? ' · 只读' : '');
+      if (s) {
+        if (!S.selected.size) { s.textContent = ''; return; }
+        const sel = S.search.hits.filter((e) => S.selected.has(selKey(S, e)));
+        const bytes = sel.reduce((a, e) => a + (e.isDir ? 0 : (e.size || 0)), 0);
+        s.textContent = `已选中 ${sel.length} 项`
+          + (bytes ? ` · ${fmtSize(bytes)}` : '');
+      }
+      return;
+    }
 
     const total = S.entries.length;
     const dirs = S.entries.filter((e) => e.isDir).length;

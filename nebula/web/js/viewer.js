@@ -541,10 +541,26 @@ const Viewer = (() => {
       });
     });
 
+    // ★ `chromeless: true` 是必须的 —— 少了它就是**两层窗口按钮** ★
+    //   用户报障原话：「网盘内部 视频文件 打开，有两层 最小化，最大化，关闭按钮。
+    //                  可以参照图片预览窗口」。
+    //   根因：`WM.Toolbar.build()` 默认就会在**最右**渲染 min/max/close 三键
+    //     （见 shell.js：`controls === false` 时才不渲染）；
+    //   而 `WM.open` 不传 `chromeless` 又会渲染一个**独立标题栏**，里面
+    //     也有一套 `.tb-btn[data-act]` 三键。
+    //   ⇒ 视频/音频窗口里外各一套 = 用户看到的两层。
+    //   图片预览（openImage）早就传了 chromeless，所以只有一层 —— 正是用户
+    //     拿来对照的那个"参照物"。这里补齐为同一种形态：
+    //     无标题栏，三键由工具栏承载，整条工具栏兼作拖拽手柄。
+    //   ⚠️ 新增预览器时必须一起传 chromeless，否则同一个坑会再来一次；
+    //      `tools/_test_window_controls.js` 会静态锁死这条约束。
     return WM.open({
       id, title: name, icon: Icons.ui(kind === 'video' ? 'play' : 'music', 16),
       width: kind === 'video' ? 880 : 520,
       height: kind === 'video' ? 560 : 180,
+      chromeless: true,
+      minWidth: kind === 'video' ? 420 : 320,
+      minHeight: kind === 'video' ? 280 : 140,
       render: (body) => render(body, mount, path, name),
       // ★ 多开时 reg/ctxOf 以 winId 为 key 会随窗口数累积 ⇒ 关窗必须清理 ★
       onClose: () => { reg.delete(id); ctxOf.delete(id); },
@@ -1006,6 +1022,11 @@ const Viewer = (() => {
         });
 
         try {
+          /* global DocsAPI */
+          // ★ OnlyOffice 的 api.js 注入的全局，**不是我们源码里的东西** ★
+          //   （share.js 的分享页那处早就有这行注解，这里一直漏着 ——
+          //     静态作用域闸门 `tools/_test_js_scope.js` 会因此报"未声明的标识符"。
+          //     注解是"本文件的"外部全局声明，比往闸门白名单里堆名字准确。）
           editor = new DocsAPI.DocEditor(`oo-host-${cssId(id)}`, config);
         } catch (e) {
           fail('编辑器初始化失败', e.message || String(e));

@@ -168,6 +168,93 @@ console.log('\n§5 样式');
     .forEach((c) => ok(`有 .${c} 样式`, css.includes('.' + c)));
 }
 
+/* ---------- §6 底部按钮顺序 ---------- */
+console.log('\n§6 底部按钮顺序（2026-10-01 用户要求）');
+
+// ⚠️⚠️ 参数序警告（本文件踩过一次，别重犯）⚠️⚠️
+//   本文件的 ok 是 `ok(名称, 条件, 附加)` —— **名称在前、条件在后**。
+//   本轮第一版照着 `.verify/verify-share-route.mjs` 的 `ok(条件, 名称)` 写，
+//   结果 11 条断言全部"通过"，打印出来却是 `✅ true` / `✅ false`
+//   —— 名称位被传了布尔、条件位被传了非空字符串（恒真）
+//   ⇒ 闸门彻底失效，而且**看不出来**（全绿）。
+//   这是记忆里记着的那个坑，一模一样地又发生了一次。
+//   ⇒ 写完先看输出：出现 `✅ true` / `✅ false` 就是参数序反了。
+{
+  // 用户原话（两句要**一起**看，只看一句一定会改错）：
+  //   ① 「这两个窗口 关闭按钮 改到右边」
+  //   ② 「保存 都放在 最右侧」
+  // 合起来是两条不变式：
+  //   A. 「关闭」类按钮不能甩在最左，得落在**右侧那一组**里；
+  //   B. 主操作（保存 / 创建链接）**压在最后**（= 最右）。
+  // 只有"没有主按钮可压"的那个弹窗（分享弹窗在「已有分享」态），
+  // 关闭才会落到最后。
+  //
+  // ⚠️ 判据必须落在**顺序**上（indexOf 谁在前），不能只查"两个按钮都在" ——
+  //    后者在改动前后都是绿的，等于没守。
+  const exFoot = (explorer.match(/dlg\.foot\.innerHTML = `([\s\S]*?)`;/) || [])[1] || '';
+  ok('取到分享对话框的页脚模板', !!exFoot, exFoot.slice(0, 80));
+  const iCreate = exFoot.indexOf('data-role="create"');
+  const iClose = exFoot.indexOf('data-role="close"');
+  const iManage = exFoot.indexOf('data-role="manage"');
+  ok('分享对话框页脚里「管理我的链接…」「创建链接」「关闭」都在',
+     iCreate >= 0 && iClose >= 0 && iManage >= 0);
+  ok('★ 分享对话框：「关闭」压在最右（用户要求）★',
+     iClose > iCreate && iClose > iManage,
+     `manage@${iManage} create@${iCreate} close@${iClose}`);
+  ok('「管理我的链接…」仍然靠最左（margin-right:auto），没被"关闭改到右边"带跑',
+     /data-role="manage"[^>]*margin-right:auto/.test(exFoot));
+
+  // ⚠️ links.js 里有**两个** `dlg.foot.innerHTML = ...`（二维码弹窗在前、
+  //    编辑分享设置在后）。取“第一个”会拿到二维码那个 ⇒ 恒判红。
+  //    必须按内容挑：要的是含 `data-role="save"` 的那一个。
+  const lnFoots = [...links.matchAll(/dlg\.foot\.innerHTML = `([\s\S]*?)`;/g)]
+    .map((m) => m[1]);
+  const lnFoot = lnFoots.find((b) => b.includes('data-role="save"')) || '';
+  ok('取到编辑分享设置对话框的页脚模板', !!lnFoot, lnFoot.slice(0, 80));
+  const iSave = lnFoot.indexOf('data-role="save"');
+  const iCancel = lnFoot.indexOf('data-role="cancel"');
+  ok('编辑分享设置页脚里「保存」「取消」都在', iSave >= 0 && iCancel >= 0);
+  ok('★ 编辑分享设置：「保存」压在最后（= 最右；用户第二句话）★',
+     iSave > iCancel, `cancel@${iCancel} save@${iSave}`);
+  ok('「取消」在右侧组里（没有被甩到最左）', iCancel > 0);
+
+  // ---- 全局不变式：除分享弹窗外，每个多按钮页脚的**最后一个按钮**都是主操作 ----
+  const allJs = ['web/js/app.js', 'web/js/explorer.js', 'web/js/links.js',
+                 'web/js/shell.js', 'web/js/viewer.js']
+    .filter((f) => fs.existsSync(path.join(ROOT, f)));
+  let footBlocks = 0;
+  const notPrimaryLast = [];
+  for (const f of allJs) {
+    const src = strip(read(f));
+    const re = /(?:foot\.innerHTML\s*=\s*`|class="dlg-foot"[^>]*>)([\s\S]{0,900}?)`|class="dlg-foot"[^>]*>([\s\S]{0,600}?)<\/div>/g;
+    let m;
+    while ((m = re.exec(src)) !== null) {
+      const blk = m[1] || m[2] || '';
+      const btns = [...blk.matchAll(/<button\b([^>]*)>/g)].map((x) => x[1]);
+      if (btns.length < 2) continue;
+      footBlocks++;
+      const last = btns[btns.length - 1];
+      if (!/\bprimary\b/.test(last)) {
+        notPrimaryLast.push({ f, blk });
+      }
+    }
+  }
+  ok(`扫到 ${footBlocks} 处多按钮页脚（<6 处说明正则没匹上）`, footBlocks >= 6);
+  // 分享弹窗是唯一例外（用户明确要求关闭最右）
+  // ⚠️ 过滤必须拿**完整的 blk**去匹配——第一版存的是裁剪过的预览串，
+  //    `data-role="create"` 被截成了 `reate"` ⇒ 例外永远匹不上，
+  //    于是第一条恒红、第二条恒红 —— 两条都在说假话。
+  const isShareDlg = (t) => /data-role="create"/.test(t.blk)
+    && /data-role="close"/.test(t.blk);
+  const real = notPrimaryLast.filter((t) => !isShareDlg(t));
+  ok('★ 除分享弹窗外，所有弹窗页脚的最后一个按钮都是主操作（.btn primary）★',
+     real.length === 0,
+     real.map((t) => `${t.f}: …${t.blk.replace(/\s+/g, ' ').slice(-70)}`).join(' || '));
+  ok('分享弹窗确实是那个例外（主按钮之后还有「关闭」）',
+     notPrimaryLast.length === 1 && isShareDlg(notPrimaryLast[0]),
+     `共 ${notPrimaryLast.length} 条未命中主操作尾部`);
+}
+
 console.log('\n════════════════════════════════');
 console.log(`  通过 ${pass} / ${pass + fail}`);
 if (fail) { console.log(`  ❌ 失败 ${fail} 项`); process.exit(1); }

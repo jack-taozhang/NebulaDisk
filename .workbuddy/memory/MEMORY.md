@@ -36,6 +36,33 @@ uvicorn **没有 `--workers`** → 只有一个事件循环。`async def` 里任
 **教训**：反代层「等后端完成某件事」前，先确认**后端完成这件事是否需要回调本代理**。
 诊断利器：**耗时是否恰好等于某个超时值**。（完整链条见附录 §1）
 
+**真实事故（2026-10-01）：「搜索一下，全站打不开」**
+`GET /api/search` 是 `async def`，却同步跑 `os.walk` + 逐条 `Path.is_dir()`。
+单 worker 被一次遍历占死 ⇒ `/healthz` 从 Windows / WSL / 容器内**三处**全返回 `000`，
+`docker ps` 显示 `unhealthy`；`docker restart` 后好 15~20s，**一搜索立刻复现**。
+py-spy 证据（唯一但足够）：
+```
+Thread 9 (idle): "MainThread"
+    stat (pathlib.py:842) → is_dir (pathlib.py:877) → api_search (app/routers/fileops.py:386)
+```
+**正解 = 两步，缺一不可**：
+1. 遍历抽成**纯同步函数** `_search_scan(...)`，路由里
+   `from starlette.concurrency import run_in_threadpool` 外派（fastapi 的依赖，不引新依赖）。
+   ⚠️ 别把它「优化」回 `async def` 的体内 —— **注释里写清这一点**。
+2. 顺手删冗余 stat：`os.walk` 返回时**已经**把目录/文件分成 `dirnames`/`filenames`，
+   再对每个条目 `Path.is_dir()` 就是纯浪费（20 万上限 = 20 万次多余系统调用，
+   网络盘上占扫描时间大头，也正是卡死的那一帧）。用 `[(d,True) for d in dirnames] + [(f,False) for f in filenames]`。
+   ⇒ 实测：全盘搜索跑满 30s，`/healthz` **20/20 全 200**。
+
+**回归闸门 `tools/_test_search_async.py`（19 条，并入 `run_share_tests.sh` 第 3 套）**：
+量具是 **ticker 协程**（每 10ms 一跳），数「搜索期间事件循环还能被调度几次」；
+把 `os.walk` 换成慢速替身（12×30ms），同步阻塞时 ticker ≤2 跳、线程池时 ≥10 跳。
+常驻**量具自检**：故意同步调 `_search_scan` ⇒ ticker 必须几乎不动。
+⚠️ 静态断言**不能**用 `"run_in_threadpool" in inspect.getsource(fn)` —— **注释里出现过就算**，
+负向自检时照样绿（假绿）。改用 `ast.unparse` 剥掉注释与 docstring 再查。
+★ 推广规则：**任何 `async def` 路由里都不许出现裸 `os.walk` / `os.scandir` 全树遍历 /
+`requests` / `time.sleep` / `subprocess.run`**；要跑就 `run_in_threadpool`。
+
 ## ★ 铁律 2：反代拆开「浏览器源」与「服务端源」★
 
 `X-Base-Url` = **浏览器**源，**必须带端口**，否则预览页白屏；绝不能用 `NEBULA_BASE_URL`。
@@ -105,6 +132,14 @@ uvicorn **没有 `--workers`** → 只有一个事件循环。`async def` 里任
 ④**几何归属 ≠ 功能正确** —— 正确判据是**看 zIndex 是否变大/是否成为最顶**；
 ⑤**探针自己也要自检**：关键动作前后各放一个"必定有副作用"的对照动作，没反应就报
 `probeBroken` 并**拒绝给结论**（**附录 §4.2/§4.3**）。
+
+**2026-10-01 又攒 5 条「红的是脚本」**（全是选择器/字段读错，产品无辜）：
+`.cell-name span` 取到的是**缩略图容器的 span**（里面只有 SVG ⇒ textContent 全空白），文件名要取**最后一个** span；
+`#sh-selall` 是 `<input type="checkbox">`，**input 的 textContent 恒为空**（「全选」二字在 `#sh-all-label`）；
+`geo()` 只返回 `{x,y,w,h,right,bottom}`，**没有 `left`**（`tree.left >= -1` 恒 false）；
+换关键词后**立刻**读结果会读到上一批（前端**故意**在 loading 期间保留旧结果）；面板类截图在 audit
+中途会被"切到旁路窗口"改掉 z 序 ⇒ 收尾 `WM.focus(被测窗口)` 复位。
+★ 额外信息里打出 `undefined` / `""` = 脚本在读空气，**先怀疑判据**。
 
 ## ★ 铁律 10：Compose v2 反直觉语义（实测）★
 
@@ -266,6 +301,10 @@ docservice 日志才说 `convertRequest unexpected outputtype = `）。
 - **预览引擎分工**：**只有 13 个走 OnlyOffice**（`doc docx docm · xls xlsx xlsm · ppt pptx pptm ·
   pdf csv tsv rtf`），其余全走 kkFileView；护栏 `OO_EDIT_EXT ⊆ KK_EXT` 且 `len ≤ 15` —— **附录 §11**
 - **测试**：**必跑** `bash nebula/tools/run_static_checks.sh`（后端静态，最易漏）+ `run_unit_tests.sh`
-  （8 套 JS/316 条）+ `run_share_tests.sh`（48 条）+ `_share_e2e.sh` + 真浏览器 `_tf_run.sh` 等
+  （**11 套 JS / 411 条**）+ `run_share_tests.sh`（**126 + 119 条**）+ `_share_e2e.sh` + `_tf_run.sh`
+- **真浏览器验证**：工作区 `D:\Docker\.verify\`，共用 `lib/cdp.mjs`。
+  `verify-spa-fixes.mjs`(34) / `verify-share-route.mjs`(76)。**截图必须亲自看**。
+  ⚠️ **各写各的 `out/` 子目录**（共用会被互删）；⚠️ 清理走 safe-delete 垫片，>50 文件会中止。
+  **完整清单 + 三个已踩的坑见附录 §13**
 - **测试环境**、**压缩包预览已知行为**、**CAD 查看器**、**共享拷贝**、**运维**、
   **agent-browser 三个致命坑** —— 全部见**附录 §12 / 附录 §1 / CAD 节 / §8 / §12 / §5**

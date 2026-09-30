@@ -282,7 +282,7 @@ curl http://127.0.0.1:8089/healthz
 JWT 都是通的；只有**正文**失败 ⇒ 一定是「OnlyOffice 服务端去 GET 文档」这一步黄了。
 所以只需查两件事：**网络能不能互通**、**地址填得对不对**。
 
-用 `dist/nebula-1.2.5/diagnose-oo.sh` 一键把证据摊开：
+用 `dist/nebula-1.2.6/diagnose-oo.sh` 一键把证据摊开：
 
 ```bash
 bash diagnose-oo.sh

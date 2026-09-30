@@ -1612,6 +1612,14 @@ const ContextMenu = (() => {
       if (el.contains(e.target) || subEl.contains(e.target)) return;
       closeAll();
     }, true);
+    // modal-guard-ok：这条**不需要**问 `Dialog.isOpen()`。
+    //   它做的唯一一件事是「Esc 关掉右键菜单」—— 而右键菜单根本活不到
+    //   弹窗打开之后（Dialog.markOpen 会主动把它收掉，见文件末尾的说明），
+    //   所以这里是幂等的空操作。反过来，若在这里 `if (Dialog.isOpen()) return`
+    //   反而会把"关菜单"这条无害收尾也挡掉。
+    //   约定：新增挂在 document 上的按键监听，**必须**要么加
+    //   `Dialog.isOpen()` 守卫，要么写一行 `modal-guard-ok：<理由>`。
+    //   tools/_test_modal_guard.js 按此标记放行。
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeAll(); });
     window.addEventListener('blur', closeAll);
     window.addEventListener('resize', closeAll);
@@ -1812,9 +1820,124 @@ const Toast = (() => {
 
 
 /* ==========================================================================
-   对话框
+   对话框（模态）
+
+   ★ 2026-09-30：「模态」必须真的是模态 ★
+     用户报障原话：「链接管理窗口打开时，其他窗口还是可以操作。
+                   服务器设置，关于窗口一样设置。」
+
+     实测（真浏览器探针，不是读代码猜）结论 —— 遮罩本身是够用的：
+       · `.modal-mask` z-index 9600 > 任务栏 9000 > 窗口(100 起)，且
+         `#desktop` 是 `position:fixed` 自成一个层叠上下文，所以
+         **鼠标**点不到下面的窗口、按 F5 也不会把下层窗口提到最前。
+       · 真正漏的是**键盘**：窗口管理器把快捷键挂在 `document` 上
+         （app.js 的 bindHotkeys、explorer.js 的窗口级 onKey），
+         它们不看"有没有弹窗"，于是弹窗开着按 F5/F2/Delete/Ctrl+A
+         照样作用在**后面那个资源管理器窗口**上。
+         （探针实测：按 F5 真的执行了下层窗口的 refresh，抛
+          `TypeError: body.querySelector is not a function` —— 下面
+          第 ② 条顺手修掉了这个真 bug。）
+
+     ⇒ 于是这里补两件事，让"模态"名副其实：
+       ① `Dialog.isOpen()`：给所有挂在 document 上的快捷键一个统一判据，
+          调用方（app.js / explorer.js）在按键处理的第一行就问它。
+       ② 焦点陷阱 + Esc 收敛：Tab 只在**最上层**那个弹窗里循环，
+          绝不让焦点跑到后面的桌面/窗口上；Esc 只关最上面那一层。
+         用**栈**而不是计数器：多层弹窗（链接管理 → 二维码）时，
+         只有栈顶能响应，且关掉一层不会误清整个状态。
+
+     ⚠️ 以后新增挂在 document 上的按键处理，同样要先问 `Dialog.isOpen()`。
+        `tools/_test_modal_guard.js` 会静态锁死这条约束。
    ========================================================================== */
 const Dialog = (() => {
+
+  /** 打开的弹窗栈（后进先出）。栈非空 = 处于模态态。 */
+  let stack = [];
+  let keyBound = false;
+
+  /** 可聚焦元素：用于焦点陷阱 */
+  const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]),'
+    + ' select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+  function focusables(mask) {
+    return [...mask.querySelectorAll(FOCUSABLE)].filter(
+      (el) => el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+  }
+
+  /**
+   * 把「有没有弹窗」这个事实写到 `<html data-modal>` 上。
+   * 为什么用 DOM 属性而不是模块内变量：
+   *   · CSS 能用（下层视觉降级 / 兜底 pointer-events）；
+   *   · 真机探针与测试能一眼读到，不必去摸模块内部；
+   *   · 值就是**层数**，多层弹窗时可读。
+   */
+  function applyFlag() {
+    if (stack.length) document.documentElement.dataset.modal = String(stack.length);
+    else delete document.documentElement.dataset.modal;
+  }
+
+  function onModalKey(e) {
+    const mask = stack[stack.length - 1];
+    if (!mask) return;
+    if (e.key === 'Escape') {
+      // 只有最上层响应；具体怎么关由各个弹窗自己决定（有的不可关）
+      if (typeof mask.__onEsc === 'function') {
+        e.preventDefault();
+        e.stopPropagation();
+        mask.__onEsc();
+      }
+      return;
+    }
+    if (e.key !== 'Tab') return;
+    // ★ 焦点陷阱 ★ 没有它，Tab 会一路跑到底下窗口的按钮上 ——
+    //   用户按两下 Tab 就"跑到弹窗外面去了"，观感上和没模态一样。
+    const f = focusables(mask);
+    if (!f.length) { e.preventDefault(); return; }
+    const first = f[0], last = f[f.length - 1];
+    const inside = mask.contains(document.activeElement);
+    if (e.shiftKey) {
+      if (!inside || document.activeElement === first) { e.preventDefault(); last.focus(); }
+    } else if (!inside || document.activeElement === last) {
+      e.preventDefault(); first.focus();
+    }
+  }
+
+  /** 弹窗进入模态态。mask 必须已 append 到 body。 */
+  function markOpen(mask) {
+    stack.push(mask);
+    applyFlag();
+    mask.setAttribute('aria-modal', 'true');
+    const box = mask.querySelector('.dialog');
+    if (box && !box.getAttribute('role')) box.setAttribute('role', 'dialog');
+    // ★ 开始菜单(9500) / 右键菜单(9810) 的 z-index 都比遮罩(9600) 高 ★
+    //   若它们此刻还开着，会**浮在模态之上**且可点 —— 那就是穿帮。
+    //   进模态前先收掉。（两个都是可选依赖，用 try 兜住。）
+    try { ContextMenu.close(); } catch (_) { /* 未定义就算了 */ }
+    try { if (typeof closeStart === 'function') closeStart(); } catch (_) { /* 同上 */ }
+    if (!keyBound) { document.addEventListener('keydown', onModalKey, true); keyBound = true; }
+  }
+
+  /** 弹窗退出模态态（可重复调用，安全） */
+  function markClose(mask) {
+    const i = stack.indexOf(mask);
+    if (i >= 0) stack.splice(i, 1);
+    applyFlag();
+    if (!stack.length && keyBound) {
+      document.removeEventListener('keydown', onModalKey, true);
+      keyBound = false;
+    }
+  }
+
+  /** 是否有弹窗开着（快捷键的守门人） */
+  function isOpen() {
+    // 自愈：万一有人绕过 close() 直接把遮罩从 DOM 摘了，
+    // 这里把已经脱落的层剔掉，避免"桌面永久停摆"。
+    if (stack.some((m) => !m.isConnected)) {
+      stack = stack.filter((m) => m.isConnected);
+      applyFlag();
+    }
+    return stack.length > 0;
+  }
 
   /** 通用确认框。返回 Promise<boolean> */
   function confirm(opts) {
@@ -1839,21 +1962,29 @@ const Dialog = (() => {
         </div>`;
 
       document.body.appendChild(mask);
+      markOpen(mask);
       requestAnimationFrame(() => mask.classList.add('open'));
 
+      let closed = false;
+      const onKey = (e) => {
+        if (e.key === 'Enter') { document.removeEventListener('keydown', onKey); done(true); }
+      };
       const done = (v) => {
+        if (closed) return;
+        closed = true;
+        document.removeEventListener('keydown', onKey);
+        markClose(mask);
         mask.classList.remove('open');
         setTimeout(() => mask.remove(), 220);
         resolve(v);
       };
+      // Esc 交给 Dialog 的统一收敛（只关最上面那一层），别在这里再绑一次 ——
+      // 两处都绑会让一次 Esc 把父子两层一起关掉。
+      mask.__onEsc = () => done(false);
       mask.querySelector('[data-r="0"]').addEventListener('click', () => done(false));
       mask.querySelector('[data-r="1"]').addEventListener('click', () => done(true));
       mask.addEventListener('mousedown', (e) => { if (e.target === mask) done(false); });
 
-      const onKey = (e) => {
-        if (e.key === 'Escape') { document.removeEventListener('keydown', onKey); done(false); }
-        if (e.key === 'Enter') { document.removeEventListener('keydown', onKey); done(true); }
-      };
       document.addEventListener('keydown', onKey);
       setTimeout(() => mask.querySelector('[data-r="1"]').focus(), 60);
     });
@@ -1883,6 +2014,7 @@ const Dialog = (() => {
         </div>`;
 
       document.body.appendChild(mask);
+      markOpen(mask);
       requestAnimationFrame(() => mask.classList.add('open'));
 
       const input = mask.querySelector('[data-role="input"]');
@@ -1897,7 +2029,11 @@ const Dialog = (() => {
         }
       }, 60);
 
+      let closed = false;
       const done = (v) => {
+        if (closed) return;
+        closed = true;
+        markClose(mask);
         mask.classList.remove('open');
         setTimeout(() => mask.remove(), 220);
         resolve(v);
@@ -1912,11 +2048,13 @@ const Dialog = (() => {
         }
         done(v);
       };
+      mask.__onEsc = () => done(null);
       mask.querySelector('[data-r="0"]').addEventListener('click', () => done(null));
       mask.querySelector('[data-r="1"]').addEventListener('click', commit);
       input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') commit();
-        if (e.key === 'Escape') done(null);
+        // Esc 不在这里处理：Dialog 的统一收敛会在捕获阶段先接住
+        //（这里再接一次会把 resolve 走两遍）
       });
       mask.addEventListener('mousedown', (e) => { if (e.target === mask) done(null); });
     });
@@ -1943,12 +2081,20 @@ const Dialog = (() => {
         ${opts.footer === false ? '' : `<div class="dlg-foot" data-role="foot"></div>`}
       </div>`;
     document.body.appendChild(mask);
+    markOpen(mask);
     requestAnimationFrame(() => mask.classList.add('open'));
 
+    let closed = false;
     const close = () => {
+      if (closed) return;
+      closed = true;
+      markClose(mask);
       mask.classList.remove('open');
       setTimeout(() => mask.remove(), 220);
     };
+    // Esc 关最上面这一层（多层时父层不动 —— 见 links.js 的同类说明）。
+    // maskClose !== false 的弹窗才允许 Esc 关；与"点遮罩关闭"保持一致。
+    if (opts.maskClose !== false) mask.__onEsc = close;
     mask.addEventListener('mousedown', (e) => { if (e.target === mask && opts.maskClose !== false) close(); });
     const closeBtn = mask.querySelector('[data-role="close"]');
     if (closeBtn) closeBtn.addEventListener('click', close);
@@ -1959,7 +2105,11 @@ const Dialog = (() => {
     };
   }
 
-  return { confirm, prompt, custom };
+  return {
+    confirm, prompt, custom,
+    /** 有弹窗开着 = 整个桌面环境必须停摆（快捷键的守门人，见文件头说明） */
+    isOpen,
+  };
 })();
 
 

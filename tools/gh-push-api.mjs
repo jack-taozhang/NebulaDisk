@@ -198,18 +198,30 @@ if (!baseCommit) {
 console.log(`diff 基点: ${baseCommit.slice(0, 8)}（本地）`)
 
 // ── 4) 列出改动 ────────────────────────────────────────────
-const diff = await gitText("diff", "--name-status", baseCommit, localHead)
+// ★★ 非 ASCII 路径必须**原样**拿到（2026-10-01 实锤）★★
+//   `git diff --name-status` 默认 `core.quotepath=true` ⇒ 非 ASCII 路径会被
+//   **加引号 + C 转义**，例如：
+//       ".workbuddy/memory/\346\212\200\346\234\257\347\273\206\350\212\202.md"
+//   拿这个转义串去 `ls-tree` 必然取不到 blob ⇒ 该文件被「跳过」⇒ 建出的 tree
+//   与本地 tree 不一致 ⇒ 脚本按设计**中止整个推送**。
+//   现象极易误判成「推送工具坏了 / 网络不通」，其实是护栏在拦一个真差异。
+//   ⇒ 用 `-z`（NUL 分隔）从根上避免任何加引号/转义。
+//     ⚠️ `-z` 下的格式是 `status\0path\0`（改名是 `status\0旧\0新\0`），
+//        和默认的 `status\tpath\n` 不一样，别混着解析。
+const diff = await gitBuf("diff", "-z", "--name-status", baseCommit, localHead)
+const f = diff.toString("utf8").split("\0")
 const changes = []
-for (const line of diff.split("\n")) {
-  if (!line.trim()) continue
-  const parts = line.split("\t")
-  const status = parts[0][0]
-  // 改名会给 R100\t旧\t新 —— 按「删旧 + 增新」处理
-  if (status === "R" || status === "C") {
-    changes.push({ status: "D", path: parts[1] })
-    changes.push({ status: "A", path: parts[2] })
+for (let i = 0; i < f.length;) {
+  const status = f[i]
+  if (!status) { i++; continue }          // 末尾空段 / 连续 NUL
+  const st = status[0]
+  i++
+  if (st === "R" || st === "C") {
+    // 改名：删旧 + 增新
+    changes.push({ status: "D", path: f[i] }); i++
+    changes.push({ status: "A", path: f[i] }); i++
   } else {
-    changes.push({ status, path: parts[1] })
+    changes.push({ status: st, path: f[i] }); i++
   }
 }
 if (!changes.length) {
@@ -231,7 +243,9 @@ for (const c of changes) {
     treeItems.push({ path: c.path, mode: "100644", type: "blob", sha: null })
     continue
   }
-  const ls = await gitText("ls-tree", localHead, c.path)
+  // ★ `:(literal)` 关掉 pathspec 的通配解释（文件名里带 * / ? / [ 时不被当模式）；
+  //   `--` 把后面的参数明确标成路径。两者都是「只按字面取这一个文件」。
+  const ls = await gitText("ls-tree", localHead, "--", `:(literal)${c.path}`)
   if (!ls) {
     skipped.push([c.path, "ls-tree 为空"])
     continue

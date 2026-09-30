@@ -40,7 +40,7 @@ files = {
                        "这里写一段比较长的文字来测试换行，中英文混排 abc def ghi jkl mno。\n",
     DOCS / "readme.md": "# NebulaDisk\n\n仿 Windows 云盘。\n\n- 目录映射\n- 双击预览\n- OnlyOffice 编辑\n",
     DOCS / "report.csv": "月份,收入,支出\n1月,12000,8000\n2月,15000,9000\n3月,11000,10000\n",
-    DOCS / "config.json": '{\n  "title": "NebulaDisk",\n  "version": "1.2.5",\n  "features": ["preview", "edit"]\n}\n',
+    DOCS / "config.json": '{\n  "title": "NebulaDisk",\n  "version": "1.2.6",\n  "features": ["preview", "edit"]\n}\n',
     DOCS / "app.py": "def hello(name):\n    \"\"\"打招呼\"\"\"\n    return f'你好，{name}!'\n\n\nif __name__ == '__main__':\n    print(hello('世界'))\n",
     DOCS / "设计文档" / "架构说明.md": "# 架构\n\n单镜像双进程：kkFileView + NebulaDisk。\n",
     DOCS / "会议纪要" / "2026-09-20.txt": "与会人：张三、李四\n议题：云盘上线\n结论：本周内完成\n",

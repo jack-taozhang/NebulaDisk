@@ -14,7 +14,7 @@
  * 后端已经把它们并成一张 links 表（kind=file|share），管理面只有一组接口：
  *   GET  /api/links            统一列表（含 url / 计数 / 状态 / 备注 / 最近访问）
  *   POST /api/links/revoke     撤销（两类都能撤）
- *   POST /api/links/rotate     换一条地址（旧地址立即失效，参数与目标不变）
+ *   POST /api/links/rotate     更新分享地址（旧地址立即失效，参数与目标不变）
  *   POST /api/links/update     改备注 / 有效期 / 次数上限 / 提取码
  *   POST /api/links/revoke-dead 清理已失效的分享
  * ⇒ 所以这里做的事是：把这一组能力**做成一个真能用的界面**，而不是一个只读列表。
@@ -32,8 +32,8 @@
  *   否则一排序/一筛选，勾选就全没了。集合的 key 是 token（稳定标识）。
  *
  * ★ 3. 「更多」用 ContextMenu，不用一排 6 个按钮 ★
- *   每行的高频动作只有「复制」；其余（编辑/换地址/定位/撤销）收进 ⋯ 菜单。
- *   一排按钮会把窄屏挤爆，而且主次不分。
+ *   每行的高频动作只有「复制」；其余（编辑分享设置/更新分享地址/定位/撤销）
+ *   收进 ⋯ 菜单。一排按钮会把窄屏挤爆，而且主次不分。
  *
  * ★ 4. 二维码在**本地**画（web/js/qr.js）★
  *   绝不能用在线二维码接口 —— 链接是「免登录、链接即凭证」，
@@ -41,8 +41,12 @@
  *   tools/qr_crosscheck.py 与参考实现逐模块比对保证。
  *
  * ★ 5. 危险动作一律二次确认，且把「会发生什么」写清楚 ★
- *   「换地址」是**主动**让旧地址失效（不是撤销），文案必须点明，
+ *   「更新分享地址」是**主动**让旧地址失效（不是撤销），文案必须点明，
  *   否则用户以为只是"再复制一条"。
+ *   ★ 菜单文案与确认框文案的分工（用户指定改版）★
+ *     菜单项只说**做什么**：「编辑分享设置」/「更新分享地址」；
+ *     「旧地址会失效」这类**副作用**放在确认框正文里讲，
+ *     菜单上不挂括号解释，否则一排菜单项读起来全是警告。
  * ========================================================================== */
 const LinkManager = (() => {
   'use strict';
@@ -205,6 +209,12 @@ const LinkManager = (() => {
       document.removeEventListener('keydown', onKey, true);
       dlg.close();
     };
+    // modal-guard-ok：这条是**弹窗内部**的按键处理，不是"桌面级快捷键"。
+    //   它第一行就要求"我的 mask 必须是最后一个（栈顶）"，本身就是模态语义；
+    //   而且 `Dialog.markOpen` 之后 Esc 会先被 Dialog 的捕获监听接住
+    //   （见 shell.js 的 onModalKey）—— 只有当弹窗显式 `maskClose: false`
+    //   （二维码那种"必须点按钮关"的）时，才轮到这条兜底。
+    //   所以它不需要（也不该）再问一次 `Dialog.isOpen()`。
     document.addEventListener('keydown', onKey, true);
   }
 
@@ -261,10 +271,13 @@ const LinkManager = (() => {
     };
   }
 
-  /** 编辑分享参数。直链只能改备注（后端也只接受改备注）。 */
+  /** 编辑分享设置。直链只能改备注（后端也只接受改备注）。 */
   function showEdit(s, onDone) {
     const isFile = s.kind === 'file';
-    const dlg = Dialog.custom({ title: `编辑 · ${s.name || s.path}`, maskClose: false });
+    // 标题与菜单项「编辑分享设置」保持一致，避免同一动作出现两种叫法
+    const dlg = Dialog.custom({
+      title: `编辑分享设置 · ${s.name || s.path}`, maskClose: false,
+    });
     dlg.el.innerHTML = `
       <div class="field">
         <label>备注（只有自己看得到）</label>
@@ -307,6 +320,16 @@ const LinkManager = (() => {
         <input type="text" data-role="pw" maxlength="32" disabled
                placeholder="留空 = 取消提取码">
       </div>`}`;
+    // ★ 底部按钮顺序：**主按钮「保存」放最右**（2026-10-01 用户要求）★
+    //   用户原话（两句要一起看）：
+    //     · 「这两个窗口 关闭按钮 改到右边」
+    //     · 「保存 都放在 最右侧」
+    //   ⇒ 规则合起来是：
+    //       ① 「关闭」类按钮要落在**右侧那一组**里（不是甩到最左）；
+    //       ② 主按钮（保存 / 创建链接）**仍然压在最右**。
+    //     所以本弹窗保持 `[取消] [保存]` —— 取消在右侧组、保存最右。
+    //     「关闭放到最右」只适用于**没有主按钮**的那个弹窗
+    //     （explorer.js 的分享对话框：`[创建链接] [关闭]`）—— 见那边的注释。
     dlg.foot.innerHTML = `
       <button class="btn" data-role="cancel">取消</button>
       <button class="btn primary" data-role="save">保存</button>`;
@@ -345,517 +368,548 @@ const LinkManager = (() => {
      主面板
      ------------------------------------------------------------------ */
   function open() {
-    const dlg = Dialog.custom({ title: '链接管理', wide: true, maskClose: false });
-    // .dialog.wide 只有 760px，放不下"类型 + 状态 + 排序 + 操作组"
-    const box = dlg.mask.querySelector('.dialog');
-    if (box) box.classList.add('links');
+    const WID = 'link-manager';
+
+    // ★ 2026-09-30 改版：从「模态遮罩弹窗」改为**桌面窗口** ★
+    //   用户报障原话：「链接管理窗口打开时，其他窗口要求是可以操作。
+    //   改为和用户管理窗口一下。」
+    //   旧实现 `Dialog.custom(...)` 的本质是一层 `.modal-mask`
+    //   （z-index 9600，见 shell.js）—— 它把整个桌面压在下面，
+    //   开着链接管理就没法操作任何其他窗口。
+    //   用户管理窗口走 `WM.open({ chromeless:true })`，非模态、可拖动、
+    //   可最小化、进任务栏。这里按同一模型重写。
+    //   ⚠️ 副产物：面板不再有自建的 Esc 收尾 —— 桌面窗口本来就不该被
+    //      Esc 关掉（用户管理窗口也如此）。面板内部弹出的二维码 /
+    //      编辑子弹窗**仍然是模态 Dialog**，它们的 Esc 由
+    //      `Dialog` 自己的捕获监听 + `escClose()` 兜底负责。
+    if (WM.get(WID)) { WM.restore(WID); WM.focus(WID); return; }
+
     // 筛选条件刻意**保留**（用户下次打开还在同一种视图）；勾选态则清空 ——
-    // 隔一次打开还留着"已选 3 条"，下次点批量撤销就是误伤。
+    // 隔一次打开还留着“已选 3 条”，下次点批量撤销就是误伤。
     state.sel.clear();
 
-    dlg.el.innerHTML = `
-      <div class="lm">
-        <div class="lm-stats" data-role="stats"></div>
-        <div class="lm-bar">
-          <label class="lm-all" title="全选当前筛选结果（不是全部数据）">
-            <input type="checkbox" data-role="all">
-            <span>全选<b class="lm-all-n" data-role="allcount"></b></span>
-          </label>
-          <div class="lm-search">
-            <span class="lm-search-icon">${Icons.ui('search', 14)}</span>
-            <input type="text" data-role="q" placeholder="搜索名称 / 路径 / 备注 / 地址">
-            <button class="lm-clear" data-role="qclear" title="清空" hidden>&times;</button>
+    WM.open({
+      id: WID,
+      title: '链接管理',
+      icon: Icons.ui('share', 16),
+      width: 1040, height: 680,
+      minWidth: 700, minHeight: 460,
+      chromeless: true,
+      render: (b) => openPanel(b),
+    });
+
+    /** 窗口内容构建（原 `dlg.el` / `dlg.foot` 的用法全部改到这里） */
+    function openPanel(body) {
+      // 原页脚的两个动作上提到窗口工具栏（页脚已随模态弹窗一起取消）
+      const bar = WM.Toolbar.build({
+        title: '链接管理',
+        left: [WM.Toolbar.btn('sweep', 'trash', '清理失效链接')],
+        right: [WM.Toolbar.btn('csv', 'download', '导出 CSV')],
+      });
+
+      body.innerHTML = `
+      <div class="win-col">
+        ${bar}
+        <div class="lm">
+          <div class="lm-stats" data-role="stats"></div>
+          <div class="lm-bar">
+            <label class="lm-all" title="全选当前筛选结果（不是全部数据）">
+              <input type="checkbox" data-role="all">
+              <span>全选<b class="lm-all-n" data-role="allcount"></b></span>
+            </label>
+            <div class="lm-search">
+              <span class="lm-search-icon">${Icons.ui('search', 14)}</span>
+              <input type="text" data-role="q" placeholder="搜索名称 / 路径 / 备注 / 地址">
+              <button class="lm-clear" data-role="qclear" title="清空" hidden>&times;</button>
+            </div>
+            <select data-role="kind" title="类型">
+              <option value="all">全部类型</option>
+              <option value="file">直链 /f/</option>
+              <option value="share">分享 /s/</option>
+            </select>
+            <select data-role="status" title="状态">
+              <option value="all">全部状态</option>
+              <option value="alive">仅有效</option>
+              <option value="dead">仅已失效</option>
+            </select>
+            <select data-role="sort" title="排序">
+              <option value="created">按创建时间</option>
+              <option value="accessed">按最近访问</option>
+              <option value="count">按访问次数</option>
+              <option value="name">按名称</option>
+            </select>
+            <button class="btn small" data-role="dir" title="升降序">↓</button>
+            <button class="btn small" data-role="refresh" title="刷新">刷新</button>
           </div>
-          <select data-role="kind" title="类型">
-            <option value="all">全部类型</option>
-            <option value="file">直链 /f/</option>
-            <option value="share">分享 /s/</option>
-          </select>
-          <select data-role="status" title="状态">
-            <option value="all">全部状态</option>
-            <option value="alive">仅有效</option>
-            <option value="dead">仅已失效</option>
-          </select>
-          <select data-role="sort" title="排序">
-            <option value="created">按创建时间</option>
-            <option value="accessed">按最近访问</option>
-            <option value="count">按访问次数</option>
-            <option value="name">按名称</option>
-          </select>
-          <button class="btn small" data-role="dir" title="升降序">↓</button>
-          <button class="btn small" data-role="refresh" title="刷新">刷新</button>
+          <div class="lm-bulk" data-role="bulk" hidden></div>
+          <div class="lm-list" data-role="list"></div>
         </div>
-        <div class="lm-bulk" data-role="bulk" hidden></div>
-        <div class="lm-list" data-role="list"></div>
       </div>`;
 
-    dlg.foot.innerHTML = `
-      <button class="btn" data-role="sweep" style="margin-right:auto">清理失效链接</button>
-      <button class="btn" data-role="csv">导出 CSV</button>
-      <button class="btn primary" data-role="close">关闭</button>`;
+      const root = body;
+      const el = (r) => root.querySelector(`[data-role="${r}"]`);
+      const listBox = el('list');
+      const bulkBox = el('bulk');
+      const statsBox = el('stats');
 
-    const root = dlg.el;
-    const el = (r) => root.querySelector(`[data-role="${r}"]`);
-    const listBox = el('list');
-    const bulkBox = el('bulk');
-    const statsBox = el('stats');
-
-    /* ---- 统计 ---- */
-    function renderStats() {
-      const n = state.items.length;
-      const nf = state.items.filter((s) => s.kind === 'file').length;
-      const ns = n - nf;
-      const dead = state.items.filter((s) => !s.alive).length;
-      const visits = state.items.reduce((a, s) => a + accessCount(s), 0);
-      const last = state.items.reduce((a, s) => Math.max(a, s.lastAccessAt || 0), 0);
-      const perm = state.items.filter((s) => s.alive && isPermanent(s)).length;
-      const cell = (v, k, cls) =>
-        `<div class="lm-stat ${cls || ''}"><b>${v}</b><span>${k}</span></div>`;
-      statsBox.innerHTML =
-        cell(n, '条链接') + cell(nf, '直链') + cell(ns, '分享')
-        + cell(perm, '永久有效')
-        + cell(dead, '已失效', dead ? 'warn' : '')
-        + cell(visits, '累计访问')
-        + `<div class="lm-stat"><b class="lm-stat-time">${last ? fmtTime(last) : '—'}</b>
-             <span>最近访问</span></div>`;
-    }
-
-    /* ---- 选中态：主控勾选框 + 批量条 + 行内勾选框 ---- */
-    //
-    // ★ 三个状态永远一起更新，别只改一个 ★
-    //   主控框（全选 / 半选 indeterminate）、批量条（数字与按钮）、
-    //   每一行的 checked —— 任何一处漏了，界面就会自相矛盾
-    //   （例如"已选 3 条"但看不到哪三行被勾）。
-    function syncSelection() {
-      const vis = visibleItems();
-      const selVis = vis.filter((s) => state.sel.has(s.token)).length;
-
-      const master = el('all');
-      if (master) {
-        master.checked = vis.length > 0 && selVis === vis.length;
-        // 半选：选了但没选全。HTML 里 indeterminate 只能由 JS 设，不能写属性
-        master.indeterminate = selVis > 0 && selVis < vis.length;
-      }
-      const cnt = el('allcount');
-      if (cnt) cnt.textContent = vis.length ? String(vis.length) : '';
-
-      listBox.querySelectorAll('.lm-item').forEach((rowEl) => {
-        const cb = rowEl.querySelector('[data-role="sel"]');
-        if (cb) cb.checked = state.sel.has(rowEl.dataset.token);
-      });
-
-      renderBulk();
-    }
-
-    /** 批量条：把"能对一批链接做的事"一次给全
-     *
-     * ★ 常显（2026-09-30，用户要求：「批量操作的 菜单条 一直显示即可」）★
-     *   原来只有「已选 ≥ 1」时才出现，两个实际后果：
-     *     ① 用户看不见这里能做什么 —— 批量处理这个能力**等于不存在**；
-     *     ② 每勾一行，整块列表就被撑下去一行，鼠标目标跟着跳，
-     *        连点两行的第二下极容易点空（列表本身还能滚动）。
-     *   所以改成恒定占位：未选时按钮**置灰 + 一行提示**，选了再点亮。
-     *   ⚠️ 置灰用 `disabled` 属性（而不是只加 class）——
-     *      这样事件层也一起挡住，不必在每个 handler 里再判一次 k === 0。
-     */
-    function renderBulk() {
-      const k = state.sel.size;
-      const vis = visibleItems().length;
-      const dis = k ? '' : ' disabled';
-      const hasShare = state.items.some((s) => state.sel.has(s.token) && s.kind === 'share');
-
-      bulkBox.hidden = false;                       // ★ 常显 ★
-      bulkBox.classList.toggle('is-empty', k === 0);
-      bulkBox.innerHTML = `
-        <span class="lm-bulk-n">${k ? `已选 <b>${k}</b> 条` : '未选择'}</span>
-        <button class="btn small" data-b="copy"${dis}>复制地址</button>
-        <button class="btn small" data-b="csv"${dis}>导出所选</button>
-        <select data-b="renew" class="lm-bulk-sel"${dis}
-                title="批量修改有效期 / 次数（两类链接都支持续期）">
-          <option value="">批量操作…</option>
-          <option value="7">延长 7 天</option>
-          <option value="30">延长 30 天</option>
-          <option value="0">改为永久有效</option>
-          <option value="novisit">解除次数限制</option>
-        </select>
-        ${!k
-          ? '<span class="lm-bulk-warn">勾选行首方框即可批量处理</span>'
-          : (hasShare ? ''
-            : '<span class="lm-bulk-warn">（"解除次数限制"只对分享生效）</span>')}
-        <button class="btn small ghost" data-b="invert"${vis ? '' : ' disabled'}>反选</button>
-        <button class="btn small ghost" data-b="none"${dis}>取消选择</button>
-        <button class="btn small danger" data-b="kill"${dis}>批量撤销</button>`;
-    }
-
-    /* ---- 列表 ---- */
-    function renderList() {
-      if (state.loading) {
-        listBox.innerHTML = '<div class="lm-empty">正在载入…</div>';
-        return;
-      }
-      if (state.err) {
-        listBox.innerHTML = `<div class="lm-empty err">载入失败：${esc(state.err)}</div>`;
-        return;
-      }
-      if (!state.items.length) {
-        listBox.innerHTML = `<div class="lm-empty">
-          还没有任何链接。<br>
-          <span class="share-hint">在文件上右键「分享」即可一次拿到分享链接与直链。</span>
-        </div>`;
-        return;
-      }
-      const rows = visibleItems();
-      if (!rows.length) {
-        listBox.innerHTML = `<div class="lm-empty">
-          没有匹配的链接。<br>
-          <span class="share-hint">试试清空搜索词，或把「类型 / 状态」改回「全部」。</span>
-        </div>`;
-        return;
+      /* ---- 统计 ---- */
+      function renderStats() {
+        const n = state.items.length;
+        const nf = state.items.filter((s) => s.kind === 'file').length;
+        const ns = n - nf;
+        const dead = state.items.filter((s) => !s.alive).length;
+        const visits = state.items.reduce((a, s) => a + accessCount(s), 0);
+        const last = state.items.reduce((a, s) => Math.max(a, s.lastAccessAt || 0), 0);
+        const perm = state.items.filter((s) => s.alive && isPermanent(s)).length;
+        const cell = (v, k, cls) =>
+          `<div class="lm-stat ${cls || ''}"><b>${v}</b><span>${k}</span></div>`;
+        statsBox.innerHTML =
+          cell(n, '条链接') + cell(nf, '直链') + cell(ns, '分享')
+          + cell(perm, '永久有效')
+          + cell(dead, '已失效', dead ? 'warn' : '')
+          + cell(visits, '累计访问')
+          + `<div class="lm-stat"><b class="lm-stat-time">${last ? fmtTime(last) : '—'}</b>
+               <span>最近访问</span></div>`;
       }
 
-      listBox.innerHTML = rows.map((s) => {
-        const isFile = s.kind === 'file';
-        const checked = state.sel.has(s.token) ? ' checked' : '';
-        const sub = [
-          `${s.mount}${s.path && s.path !== s.name ? ':' + s.path : ''}`,
-          stateText(s),
-          `${accessCount(s)} 次${isFile ? '打开' : '访问'}`,
-          s.lastAccessAt ? `最近 ${fmtTime(s.lastAccessAt)}` : '从未被访问',
-          s.hasPassword ? '有提取码' : '',
-        ].filter(Boolean).join(' · ');
+      /* ---- 选中态：主控勾选框 + 批量条 + 行内勾选框 ---- */
+      //
+      // ★ 三个状态永远一起更新，别只改一个 ★
+      //   主控框（全选 / 半选 indeterminate）、批量条（数字与按钮）、
+      //   每一行的 checked —— 任何一处漏了，界面就会自相矛盾
+      //   （例如"已选 3 条"但看不到哪三行被勾）。
+      function syncSelection() {
+        const vis = visibleItems();
+        const selVis = vis.filter((s) => state.sel.has(s.token)).length;
 
-        return `
-        <div class="lm-item${s.alive ? '' : ' dead'}" data-token="${esc(s.token)}">
-          <label class="lm-check" title="选择">
-            <input type="checkbox" data-role="sel"${checked}>
-          </label>
-          <div class="lm-main">
-            <div class="lm-name">
-              <span class="share-kind ${isFile ? 'kind-file' : 'kind-share'}">${KIND_LABEL[s.kind]}</span>
-              <span class="lm-title" title="${esc(stateTip(s))}">${esc(s.name || s.path || '(未命名)')}</span>
-              ${permChip(s)}
-              ${s.note ? `<span class="lm-note" title="${esc(s.note)}">${esc(s.note)}</span>` : ''}
-              ${s.alive ? '' : '<span class="lm-dead">已失效</span>'}
+        const master = el('all');
+        if (master) {
+          master.checked = vis.length > 0 && selVis === vis.length;
+          // 半选：选了但没选全。HTML 里 indeterminate 只能由 JS 设，不能写属性
+          master.indeterminate = selVis > 0 && selVis < vis.length;
+        }
+        const cnt = el('allcount');
+        if (cnt) cnt.textContent = vis.length ? String(vis.length) : '';
+
+        listBox.querySelectorAll('.lm-item').forEach((rowEl) => {
+          const cb = rowEl.querySelector('[data-role="sel"]');
+          if (cb) cb.checked = state.sel.has(rowEl.dataset.token);
+        });
+
+        renderBulk();
+      }
+
+      /** 批量条：把"能对一批链接做的事"一次给全
+       *
+       * ★ 常显（2026-09-30，用户要求：「批量操作的 菜单条 一直显示即可」）★
+       *   原来只有「已选 ≥ 1」时才出现，两个实际后果：
+       *     ① 用户看不见这里能做什么 —— 批量处理这个能力**等于不存在**；
+       *     ② 每勾一行，整块列表就被撑下去一行，鼠标目标跟着跳，
+       *        连点两行的第二下极容易点空（列表本身还能滚动）。
+       *   所以改成恒定占位：未选时按钮**置灰 + 一行提示**，选了再点亮。
+       *   ⚠️ 置灰用 `disabled` 属性（而不是只加 class）——
+       *      这样事件层也一起挡住，不必在每个 handler 里再判一次 k === 0。
+       */
+      function renderBulk() {
+        const k = state.sel.size;
+        const vis = visibleItems().length;
+        const dis = k ? '' : ' disabled';
+        const hasShare = state.items.some((s) => state.sel.has(s.token) && s.kind === 'share');
+
+        bulkBox.hidden = false;                       // ★ 常显 ★
+        bulkBox.classList.toggle('is-empty', k === 0);
+        bulkBox.innerHTML = `
+          <span class="lm-bulk-n">${k ? `已选 <b>${k}</b> 条` : '未选择'}</span>
+          <button class="btn small" data-b="copy"${dis}>复制地址</button>
+          <button class="btn small" data-b="csv"${dis}>导出所选</button>
+          <select data-b="renew" class="lm-bulk-sel"${dis}
+                  title="批量修改有效期 / 次数（两类链接都支持续期）">
+            <option value="">批量操作…</option>
+            <option value="7">延长 7 天</option>
+            <option value="30">延长 30 天</option>
+            <option value="0">改为永久有效</option>
+            <option value="novisit">解除次数限制</option>
+          </select>
+          ${!k
+            ? '<span class="lm-bulk-warn">勾选行首方框即可批量处理</span>'
+            : (hasShare ? ''
+              : '<span class="lm-bulk-warn">（"解除次数限制"只对分享生效）</span>')}
+          <button class="btn small ghost" data-b="invert"${vis ? '' : ' disabled'}>反选</button>
+          <button class="btn small ghost" data-b="none"${dis}>取消选择</button>
+          <button class="btn small danger" data-b="kill"${dis}>批量撤销</button>`;
+      }
+
+      /* ---- 列表 ---- */
+      function renderList() {
+        if (state.loading) {
+          listBox.innerHTML = '<div class="lm-empty">正在载入…</div>';
+          return;
+        }
+        if (state.err) {
+          listBox.innerHTML = `<div class="lm-empty err">载入失败：${esc(state.err)}</div>`;
+          return;
+        }
+        if (!state.items.length) {
+          listBox.innerHTML = `<div class="lm-empty">
+            还没有任何链接。<br>
+            <span class="share-hint">在文件上右键「分享」即可一次拿到分享链接与直链。</span>
+          </div>`;
+          return;
+        }
+        const rows = visibleItems();
+        if (!rows.length) {
+          listBox.innerHTML = `<div class="lm-empty">
+            没有匹配的链接。<br>
+            <span class="share-hint">试试清空搜索词，或把「类型 / 状态」改回「全部」。</span>
+          </div>`;
+          return;
+        }
+
+        listBox.innerHTML = rows.map((s) => {
+          const isFile = s.kind === 'file';
+          const checked = state.sel.has(s.token) ? ' checked' : '';
+          const sub = [
+            `${s.mount}${s.path && s.path !== s.name ? ':' + s.path : ''}`,
+            stateText(s),
+            `${accessCount(s)} 次${isFile ? '打开' : '访问'}`,
+            s.lastAccessAt ? `最近 ${fmtTime(s.lastAccessAt)}` : '从未被访问',
+            s.hasPassword ? '有提取码' : '',
+          ].filter(Boolean).join(' · ');
+
+          return `
+          <div class="lm-item${s.alive ? '' : ' dead'}" data-token="${esc(s.token)}">
+            <label class="lm-check" title="选择">
+              <input type="checkbox" data-role="sel"${checked}>
+            </label>
+            <div class="lm-main">
+              <div class="lm-name">
+                <span class="share-kind ${isFile ? 'kind-file' : 'kind-share'}">${KIND_LABEL[s.kind]}</span>
+                <span class="lm-title" title="${esc(stateTip(s))}">${esc(s.name || s.path || '(未命名)')}</span>
+                ${permChip(s)}
+                ${s.note ? `<span class="lm-note" title="${esc(s.note)}">${esc(s.note)}</span>` : ''}
+                ${s.alive ? '' : '<span class="lm-dead">已失效</span>'}
+              </div>
+              <div class="lm-sub" title="${esc(sub)}">${esc(sub)}</div>
+              <div class="lm-url" title="${esc(fullUrl(s))}"><code>${esc(fullUrl(s))}</code></div>
             </div>
-            <div class="lm-sub" title="${esc(sub)}">${esc(sub)}</div>
-            <div class="lm-url" title="${esc(fullUrl(s))}"><code>${esc(fullUrl(s))}</code></div>
-          </div>
-          <div class="lm-acts">
-            <button class="btn small" data-act="copy">复制</button>
-            <button class="btn small" data-act="open">打开</button>
-            <button class="btn small" data-act="qr">二维码</button>
-            <button class="btn small ghost" data-act="more" title="更多操作">⋯</button>
-          </div>
-        </div>`;
-      }).join('');
-    }
-
-    function renderAll() {
-      renderStats();
-      renderList();      // ★ 先渲染行，syncSelection 才能把勾选框设对 ★
-      syncSelection();
-    }
-
-    /* ---- 拉数据 ---- */
-    async function refresh() {
-      state.loading = true;
-      state.err = '';
-      renderList();
-      try {
-        const r = await API.links();
-        state.items = r.items || [];
-        // 清掉已经不存在的选中项（例如在别处被撤销了）
-        const alive = new Set(state.items.map((s) => s.token));
-        [...state.sel].forEach((t) => { if (!alive.has(t)) state.sel.delete(t); });
-      } catch (e) {
-        state.err = e.message || String(e);
-        state.items = [];
-      } finally {
-        state.loading = false;
-        renderAll();
+            <div class="lm-acts">
+              <button class="btn small" data-act="copy">复制</button>
+              <button class="btn small" data-act="open">打开</button>
+              <button class="btn small" data-act="qr">二维码</button>
+              <button class="btn small ghost" data-act="more" title="更多操作">⋯</button>
+            </div>
+          </div>`;
+        }).join('');
       }
-    }
 
-    /* ---- 单条动作 ---- */
-    async function doRotate(s) {
-      const ok = await Dialog.confirm({
-        title: '换一条地址',
-        message: `会为「${s.name || s.path}」生成一条新的${KIND_LABEL[s.kind]}地址，`
-          + '旧地址立刻失效（已经发出去的那条就打不开了）。'
-          + '有效期、提取码、次数上限都保持不变。',
-        okText: '换地址', danger: true,
-      });
-      if (!ok) return;
-      try {
-        const r = await API.linkRotate(s.token);
-        const link = r.link || {};
-        Toast.ok('已换地址', link.url || '');
+      function renderAll() {
+        renderStats();
+        renderList();      // ★ 先渲染行，syncSelection 才能把勾选框设对 ★
+        syncSelection();
+      }
+
+      /* ---- 拉数据 ---- */
+      async function refresh() {
+        state.loading = true;
+        state.err = '';
+        renderList();
+        try {
+          const r = await API.links();
+          state.items = r.items || [];
+          // 清掉已经不存在的选中项（例如在别处被撤销了）
+          const alive = new Set(state.items.map((s) => s.token));
+          [...state.sel].forEach((t) => { if (!alive.has(t)) state.sel.delete(t); });
+        } catch (e) {
+          state.err = e.message || String(e);
+          state.items = [];
+        } finally {
+          state.loading = false;
+          renderAll();
+        }
+      }
+
+      /* ---- 单条动作 ---- */
+      async function doRotate(s) {
+        const ok = await Dialog.confirm({
+          title: '更新分享地址',
+          message: `会为「${s.name || s.path}」生成一条新的${KIND_LABEL[s.kind]}地址，`
+            + '旧地址立刻失效（已经发出去的那条就打不开了）。'
+            + '有效期、提取码、次数上限都保持不变。',
+          okText: '更新地址', danger: true,
+        });
+        if (!ok) return;
+        try {
+          const r = await API.linkRotate(s.token);
+          const link = r.link || {};
+          Toast.ok('已更新地址', link.url || '');
+          await refresh();
+          if (link.url) copyText(link.url, link.url);
+        } catch (e) {
+          Toast.error('更新地址失败', e.message);
+        }
+      }
+
+      async function doRevoke(tokens) {
+        if (!tokens.length) return;
+        const names = tokens.length === 1
+          ? `「${(state.items.find((x) => x.token === tokens[0]) || {}).name || '该链接'}」`
+          : `选中的 ${tokens.length} 条链接`;
+        const ok = await Dialog.confirm({
+          title: '撤销链接',
+          message: `撤销${names}？撤销后这些地址立即失效，且不可恢复。`,
+          okText: '撤销', danger: true,
+        });
+        if (!ok) return;
+        let done = 0;
+        const failed = [];
+        for (const t of tokens) {
+          try { await API.linkRevoke(t); done++; state.sel.delete(t); }
+          catch (e) { failed.push(t); }
+        }
+        if (done) Toast.ok(`已撤销 ${done} 条`);
+        if (failed.length) Toast.error(`${failed.length} 条撤销失败`, '可能已被删除');
         await refresh();
-        if (link.url) copyText(link.url, link.url);
-      } catch (e) {
-        Toast.error('换地址失败', e.message);
       }
-    }
 
-    async function doRevoke(tokens) {
-      if (!tokens.length) return;
-      const names = tokens.length === 1
-        ? `「${(state.items.find((x) => x.token === tokens[0]) || {}).name || '该链接'}」`
-        : `选中的 ${tokens.length} 条链接`;
-      const ok = await Dialog.confirm({
-        title: '撤销链接',
-        message: `撤销${names}？撤销后这些地址立即失效，且不可恢复。`,
-        okText: '撤销', danger: true,
-      });
-      if (!ok) return;
-      let done = 0;
-      const failed = [];
-      for (const t of tokens) {
-        try { await API.linkRevoke(t); done++; state.sel.delete(t); }
-        catch (e) { failed.push(t); }
-      }
-      if (done) Toast.ok(`已撤销 ${done} 条`);
-      if (failed.length) Toast.error(`${failed.length} 条撤销失败`, '可能已被删除');
-      await refresh();
-    }
-
-    async function doMore(s, btn) {
-      const r = btn.getBoundingClientRect();
-      const items = [
-        {
-          label: '编辑备注 / 参数…', icon: 'edit',
-          onClick: () => showEdit(s, refresh),
-        },
-        {
-          label: '换一条地址（旧地址失效）', icon: 'refresh',
-          onClick: () => doRotate(s),
-        },
-      ];
-      // 定位：打开该文件所在目录（后端保证 mount+path 是 owner 可见的）
-      if (s.path) {
-        items.push({
-          label: '在网盘中定位', icon: 'folder',
-          onClick: () => {
-            Explorer.reveal(s.mount, s.path);
-            closeAll();
+      async function doMore(s, btn) {
+        const r = btn.getBoundingClientRect();
+        const items = [
+          {
+            // ★ 文案（用户指定）：「编辑备注/参数...」→「编辑分享设置」★
+            //   原标题把实现细节（备注 / 参数）摆到了台面上，而用户在这个
+            //   菜单里真正做的是「改这条分享的规则」—— 备注只是其中一项。
+            label: '编辑分享设置', icon: 'edit',
+            onClick: () => showEdit(s, refresh),
           },
+          {
+            // ★ 文案（用户指定）：「换一条地址（就地址失效）」→「更新分享地址」★
+            //   旧文案的括号是在解释**副作用**，读起来像警告而不是动作；
+            //   副作用改由确认框正文说明（见 doRotate），菜单项只说做什么。
+            label: '更新分享地址', icon: 'refresh',
+            onClick: () => doRotate(s),
+          },
+        ];
+        // 定位：打开该文件所在目录（后端保证 mount+path 是 owner 可见的）
+        if (s.path) {
+          items.push({
+            label: '在网盘中定位', icon: 'folder',
+            onClick: () => {
+              Explorer.reveal(s.mount, s.path);
+              closeAll();
+            },
+          });
+        }
+        items.push({ sep: true });
+        items.push({
+          label: '撤销这条链接', icon: 'trash', danger: true,
+          onClick: () => doRevoke([s.token]),
         });
+        ContextMenu.show(r.left, r.bottom + 4, items);
       }
-      items.push({ sep: true });
-      items.push({
-        label: '撤销这条链接', icon: 'trash', danger: true,
-        onClick: () => doRevoke([s.token]),
+
+      /* ---- 事件：列表（委托，避免每次重渲染都重绑）---- */
+      listBox.addEventListener('click', (e) => {
+        const row = e.target.closest('.lm-item');
+        if (!row) return;
+        const s = state.items.find((x) => x.token === row.dataset.token);
+        if (!s) return;
+
+        // 勾选框
+        if (e.target.matches('[data-role="sel"]')) {
+          if (e.target.checked) state.sel.add(s.token); else state.sel.delete(s.token);
+          syncSelection();
+          return;
+        }
+        // 行的空白/文字区 → 切换选中（像文件列表那样）
+        const act = e.target.closest('[data-act]');
+        if (!act) {
+          if (e.target.closest('.lm-url') || e.target.closest('.lm-check')) return;
+          if (state.sel.has(s.token)) state.sel.delete(s.token); else state.sel.add(s.token);
+          syncSelection();
+          return;
+        }
+
+        const a = act.dataset.act;
+        if (a === 'copy') return copyText(fullUrl(s));
+        if (a === 'open') {
+          window.open(fullUrl(s), '_blank');
+          return;
+        }
+        if (a === 'qr') return showQR(s);
+        if (a === 'more') return doMore(s, act);
       });
-      ContextMenu.show(r.left, r.bottom + 4, items);
-    }
 
-    /* ---- 事件：列表（委托，避免每次重渲染都重绑）---- */
-    listBox.addEventListener('click', (e) => {
-      const row = e.target.closest('.lm-item');
-      if (!row) return;
-      const s = state.items.find((x) => x.token === row.dataset.token);
-      if (!s) return;
+      // 双击行 → 打开
+      listBox.addEventListener('dblclick', (e) => {
+        const row = e.target.closest('.lm-item');
+        if (!row || e.target.closest('[data-act]') || e.target.closest('[data-role="sel"]')) return;
+        const s = state.items.find((x) => x.token === row.dataset.token);
+        if (s) window.open(fullUrl(s), '_blank');
+      });
 
-      // 勾选框
-      if (e.target.matches('[data-role="sel"]')) {
-        if (e.target.checked) state.sel.add(s.token); else state.sel.delete(s.token);
-        syncSelection();
-        return;
-      }
-      // 行的空白/文字区 → 切换选中（像文件列表那样）
-      const act = e.target.closest('[data-act]');
-      if (!act) {
-        if (e.target.closest('.lm-url') || e.target.closest('.lm-check')) return;
-        if (state.sel.has(s.token)) state.sel.delete(s.token); else state.sel.add(s.token);
-        syncSelection();
-        return;
-      }
+      /* ---- 事件：批量条 ---- */
+      bulkBox.addEventListener('click', async (e) => {
+        const b = e.target.closest('[data-b]');
+        if (!b || b.tagName === 'SELECT') return;
+        const action = b.dataset.b;
+        const tokens = [...state.sel];
+        const sel = state.items.filter((s) => state.sel.has(s.token));
 
-      const a = act.dataset.act;
-      if (a === 'copy') return copyText(fullUrl(s));
-      if (a === 'open') {
-        window.open(fullUrl(s), '_blank');
-        return;
-      }
-      if (a === 'qr') return showQR(s);
-      if (a === 'more') return doMore(s, act);
-    });
+        if (action === 'none') {
+          state.sel.clear();
+          syncSelection();
+          return;
+        }
+        if (action === 'invert') {
+          // 反选只作用于**当前筛选结果**（与"全选"同一口径，否则会误伤看不见的行）
+          visibleItems().forEach((s) => {
+            if (state.sel.has(s.token)) state.sel.delete(s.token);
+            else state.sel.add(s.token);
+          });
+          syncSelection();
+          return;
+        }
+        if (action === 'copy') {
+          const urls = sel.map(fullUrl);
+          return copyText(urls.join('\n'), `已复制 ${urls.length} 条地址`);
+        }
+        if (action === 'csv') return exportCSV(sel, '链接清单-所选');
+        if (action === 'kill') return doRevoke(tokens);
+      });
 
-    // 双击行 → 打开
-    listBox.addEventListener('dblclick', (e) => {
-      const row = e.target.closest('.lm-item');
-      if (!row || e.target.closest('[data-act]') || e.target.closest('[data-role="sel"]')) return;
-      const s = state.items.find((x) => x.token === row.dataset.token);
-      if (s) window.open(fullUrl(s), '_blank');
-    });
+      // 批量续期 / 解除次数限制（只对分享有意义；直链没有这些维度）
+      bulkBox.addEventListener('change', async (e) => {
+        const s = e.target.closest('[data-b="renew"]');
+        if (!s || !s.value) return;
+        const mode = s.value;
+        s.value = '';
+        const sel = state.items.filter((x) => state.sel.has(x.token));
+        // 「解除次数限制」只对分享有意义；「延长 / 永久」两类都有有效期，都能改
+        const targets = sel.filter((x) => mode !== 'novisit' || x.kind === 'share');
+        if (!targets.length) {
+          return Toast.info('所选里没有分享',
+            '直链没有次数上限，所以"解除次数限制"对它没用（改有效期请选上面几项）');
+        }
+        const patch = mode === 'novisit'
+          ? { maxVisits: 0 }
+          : { ttlDays: Number(mode) };
+        const label = mode === 'novisit' ? '解除次数限制'
+          : (Number(mode) === 0 ? '改为永久有效' : `延长 ${mode} 天`);
 
-    /* ---- 事件：批量条 ---- */
-    bulkBox.addEventListener('click', async (e) => {
-      const b = e.target.closest('[data-b]');
-      if (!b || b.tagName === 'SELECT') return;
-      const action = b.dataset.b;
-      const tokens = [...state.sel];
-      const sel = state.items.filter((s) => state.sel.has(s.token));
+        let done = 0, failed = 0;
+        for (const x of targets) {
+          try { await API.linkUpdate(x.token, patch); done++; }
+          catch (err) { failed++; }
+        }
+        if (done) Toast.ok('批量处理完成', `${label}：成功 ${done} 条${failed ? `，失败 ${failed} 条` : ''}`);
+        if (failed && !done) Toast.error('批量处理失败', `${failed} 条都没成功`);
+        await refresh();
+      });
 
-      if (action === 'none') {
-        state.sel.clear();
-        syncSelection();
-        return;
-      }
-      if (action === 'invert') {
-        // 反选只作用于**当前筛选结果**（与"全选"同一口径，否则会误伤看不见的行）
-        visibleItems().forEach((s) => {
-          if (state.sel.has(s.token)) state.sel.delete(s.token);
-          else state.sel.add(s.token);
+      /* ---- 导出 CSV（页脚=当前筛选结果；批量条=所选项）---- */
+      function exportCSV(list, namePrefix) {
+        const rows = list.filter(Boolean);
+        if (!rows.length) return Toast.info('没有可导出的链接');
+        const head = ['类型', '名称', '映射', '路径', '地址', '状态', '访问次数',
+          '最近访问', '创建时间', '提取码', '备注'];
+        const cell = (v) => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
+        const lines = [head.map(cell).join(',')];
+        rows.forEach((s) => {
+          lines.push([
+            KIND_LABEL[s.kind], s.name, s.mount, s.path, fullUrl(s), stateText(s),
+            accessCount(s),
+            s.lastAccessAt ? fmtTimeFull(s.lastAccessAt) : '',
+            s.createdAt ? fmtTimeFull(s.createdAt) : '',
+            s.hasPassword ? '有' : '无', s.note || '',
+          ].map(cell).join(','));
         });
+        // ★ 加 BOM：否则 Excel 打开中文是乱码 ★
+        const blob = new Blob(['\ufeff' + lines.join('\r\n')],
+          { type: 'text/csv;charset=utf-8' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `${namePrefix}-${new Date().toISOString().slice(0, 10)}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+        Toast.ok('已导出', `${rows.length} 条`);
+      }
+
+      /* ---- 事件：工具条 ---- */
+      const qInput = el('q');
+      const qClear = el('qclear');
+      const bindFilter = (role, key) => {
+        el(role).onchange = (e) => {
+          state[key] = e.target.value;
+          renderList();
+          syncSelection();
+        };
+      };
+
+      /* ★ 主控「全选」★
+         口径是「当前**筛选结果**」而不是全部数据 —— 搜索/筛选之后点全选，
+         用户期待的是"把我看得见的这些全选上"。所以标签里带上数量，
+         并且用 indeterminate 表达"选了一部分"。 */
+      el('all').onchange = (e) => {
+        const vis = visibleItems();
+        if (e.target.checked) vis.forEach((s) => state.sel.add(s.token));
+        else vis.forEach((s) => state.sel.delete(s.token));
         syncSelection();
-        return;
-      }
-      if (action === 'copy') {
-        const urls = sel.map(fullUrl);
-        return copyText(urls.join('\n'), `已复制 ${urls.length} 条地址`);
-      }
-      if (action === 'csv') return exportCSV(sel, '链接清单-所选');
-      if (action === 'kill') return doRevoke(tokens);
-    });
+      };
 
-    // 批量续期 / 解除次数限制（只对分享有意义；直链没有这些维度）
-    bulkBox.addEventListener('change', async (e) => {
-      const s = e.target.closest('[data-b="renew"]');
-      if (!s || !s.value) return;
-      const mode = s.value;
-      s.value = '';
-      const sel = state.items.filter((x) => state.sel.has(x.token));
-      // 「解除次数限制」只对分享有意义；「延长 / 永久」两类都有有效期，都能改
-      const targets = sel.filter((x) => mode !== 'novisit' || x.kind === 'share');
-      if (!targets.length) {
-        return Toast.info('所选里没有分享',
-          '直链没有次数上限，所以"解除次数限制"对它没用（改有效期请选上面几项）');
-      }
-      const patch = mode === 'novisit'
-        ? { maxVisits: 0 }
-        : { ttlDays: Number(mode) };
-      const label = mode === 'novisit' ? '解除次数限制'
-        : (Number(mode) === 0 ? '改为永久有效' : `延长 ${mode} 天`);
-
-      let done = 0, failed = 0;
-      for (const x of targets) {
-        try { await API.linkUpdate(x.token, patch); done++; }
-        catch (err) { failed++; }
-      }
-      if (done) Toast.ok('批量处理完成', `${label}：成功 ${done} 条${failed ? `，失败 ${failed} 条` : ''}`);
-      if (failed && !done) Toast.error('批量处理失败', `${failed} 条都没成功`);
-      await refresh();
-    });
-
-    /* ---- 导出 CSV（页脚=当前筛选结果；批量条=所选项）---- */
-    function exportCSV(list, namePrefix) {
-      const rows = list.filter(Boolean);
-      if (!rows.length) return Toast.info('没有可导出的链接');
-      const head = ['类型', '名称', '映射', '路径', '地址', '状态', '访问次数',
-        '最近访问', '创建时间', '提取码', '备注'];
-      const cell = (v) => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
-      const lines = [head.map(cell).join(',')];
-      rows.forEach((s) => {
-        lines.push([
-          KIND_LABEL[s.kind], s.name, s.mount, s.path, fullUrl(s), stateText(s),
-          accessCount(s),
-          s.lastAccessAt ? fmtTimeFull(s.lastAccessAt) : '',
-          s.createdAt ? fmtTimeFull(s.createdAt) : '',
-          s.hasPassword ? '有' : '无', s.note || '',
-        ].map(cell).join(','));
-      });
-      // ★ 加 BOM：否则 Excel 打开中文是乱码 ★
-      const blob = new Blob(['\ufeff' + lines.join('\r\n')],
-        { type: 'text/csv;charset=utf-8' });
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = `${namePrefix}-${new Date().toISOString().slice(0, 10)}.csv`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(a.href), 4000);
-      Toast.ok('已导出', `${rows.length} 条`);
-    }
-
-    /* ---- 事件：工具条 ---- */
-    const qInput = el('q');
-    const qClear = el('qclear');
-    const bindFilter = (role, key) => {
-      el(role).onchange = (e) => {
-        state[key] = e.target.value;
+      qInput.oninput = debounce(() => {
+        state.q = qInput.value;
+        qClear.hidden = !state.q;
+        renderList();
+        syncSelection();
+      }, 120);
+      qClear.onclick = () => {
+        qInput.value = '';
+        state.q = '';
+        qClear.hidden = true;
+        qInput.focus();
         renderList();
         syncSelection();
       };
-    };
+      bindFilter('kind', 'kind');
+      bindFilter('status', 'status');
+      bindFilter('sort', 'sort');
+      el('dir').onclick = (e) => {
+        state.desc = !state.desc;
+        e.currentTarget.textContent = state.desc ? '↓' : '↑';
+        renderList();
+        syncSelection();
+      };
+      el('refresh').onclick = () => refresh();
 
-    /* ★ 主控「全选」★
-       口径是「当前**筛选结果**」而不是全部数据 —— 搜索/筛选之后点全选，
-       用户期待的是"把我看得见的这些全选上"。所以标签里带上数量，
-       并且用 indeterminate 表达"选了一部分"。 */
-    el('all').onchange = (e) => {
-      const vis = visibleItems();
-      if (e.target.checked) vis.forEach((s) => state.sel.add(s.token));
-      else vis.forEach((s) => state.sel.delete(s.token));
-      syncSelection();
-    };
+      /* ---- 事件：工具栏 ---- */
+      // 面板现在是**桌面窗口**：动作按钮走工具栏的 [data-a]（见 WM.Toolbar.btn），
+      // 关闭交给 WM 自己的 ✕（Toolbar.build 默认带三键），
+      // 所以不再有「关闭」按钮，也没有自建的 Esc 收尾。
+      // ⚠️ 别把这里改回 `dlg.foot` —— 那会重新引入一层模态遮罩。
+      const closeAll = () => WM.close(WID);
 
-    qInput.oninput = debounce(() => {
-      state.q = qInput.value;
-      qClear.hidden = !state.q;
-      renderList();
-      syncSelection();
-    }, 120);
-    qClear.onclick = () => {
-      qInput.value = '';
-      state.q = '';
-      qClear.hidden = true;
-      qInput.focus();
-      renderList();
-      syncSelection();
-    };
-    bindFilter('kind', 'kind');
-    bindFilter('status', 'status');
-    bindFilter('sort', 'sort');
-    el('dir').onclick = (e) => {
-      state.desc = !state.desc;
-      e.currentTarget.textContent = state.desc ? '↓' : '↑';
-      renderList();
-      syncSelection();
-    };
-    el('refresh').onclick = () => refresh();
+      const sweepBtn = root.querySelector('[data-a="sweep"]');
+      if (sweepBtn) sweepBtn.onclick = async () => {
+        try {
+          const r = await API.linkRevokeDead();
+          Toast.ok('已清理', `删除了 ${r.revoked || 0} 条失效链接`);
+          await refresh();
+        } catch (e) { Toast.error('清理失败', e.message); }
+      };
 
-    /* ---- 事件：页脚 ---- */
-    // 统一走 close()：它顺带摘掉 Esc 监听，否则关窗后 Esc 还会再去关一次
-    // ★ Esc 只关**最上面那一层** ★
-    //   面板里还会再开二维码 / 编辑子弹窗，若不判断层数，
-    //   一次 Esc 会把两层一起关掉（用户会觉得"手滑丢了编辑内容"）。
-    const closeAll = () => {
-      document.removeEventListener('keydown', onKey, true);
-      dlg.close();
-    };
-    const onKey = (e) => {
-      if (e.key !== 'Escape') return;
-      if (document.querySelectorAll('.modal-mask.open').length > 1) return;
-      closeAll();
-    };
-    document.addEventListener('keydown', onKey, true);
+      const csvBtn = root.querySelector('[data-a="csv"]');
+      if (csvBtn) csvBtn.onclick = () => exportCSV(visibleItems(), '链接清单');
 
-    dlg.foot.querySelector('[data-role="close"]').onclick = () => closeAll();
-
-    dlg.foot.querySelector('[data-role="sweep"]').onclick = async () => {
-      try {
-        const r = await API.linkRevokeDead();
-        Toast.ok('已清理', `删除了 ${r.revoked || 0} 条失效链接`);
-        await refresh();
-      } catch (e) { Toast.error('清理失败', e.message); }
-    };
-
-    dlg.foot.querySelector('[data-role="csv"]').onclick = () => exportCSV(visibleItems(), '链接清单');
-
-    renderAll();
-    refresh();
+      renderAll();
+      refresh();
+    }
   }
 
-  return { open, _state: state };
+  // ★ `edit` 是给**右键「分享」对话框**用的 ★
+  //   后端自 2026-10-01 起「一个目标只留一条分享」，所以分享对话框遇到
+  //   已有分享时不再自己造表单，而是把用户引到这里来改参数（同一套 UI，
+  //   避免出现"两处都能改、改法还不一样"）。
+  return { open, edit: showEdit, _state: state };
 })();

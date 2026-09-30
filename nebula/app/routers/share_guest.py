@@ -157,9 +157,19 @@ async def api_share_zip(
       逐个文件单独下会得到一堆散包，整目录打包又太重。
 
     ★ 越权边界与 list / raw / preview **完全同源** ★
-      每个勾选项都过一遍同一个 _resolve_in_share()：
-      拼到当前子路径后面 → resolve() → 断言仍在分享根之下。
-      另外先挡掉名字里带 `/` 或 `..` 的项（正常前端不会发，但接口是公开的）。
+      每个勾选项都过一遍同一个 _resolve_in_share()：拼路径 → resolve()
+      → 断言仍在分享根之下。这一步是**唯一**的边界，其余都是"让报错可读"。
+
+    ★ item 语义（2026-10-01 放宽：允许带 `/` 的**根相对路径**）★
+      旧版要求 item 必须是「当前 path 目录下的一个名字」，于是选择集只能
+      在同一层里勾 —— 但左侧文件树是可以**跨目录**勾选的（展开几个子目录，
+      各挑一个文件）。所以现在：
+        · item 一律按**分享根**解释（与 path 无关），允许 `a/b/c.pdf` 这种形式；
+        · 仍然逐个过 _resolve_in_share()，`..` / 绝对路径逃逸依旧被 403 挡住；
+        · 包内 arcname 用这条根相对路径 ⇒ 解压后能还原出子目录结构，
+          同时勾 `报告/x.pdf` 和 `图片/y.png` 不会互相覆盖。
+      光挡"名字里带 /"是挡不住 `../` 的（`..` 本身不含 `/` 也照样逃逸），
+      真正兜底的一直是 _resolve_in_share —— 放开 `/` 没有削弱它。
 
     ★ 为什么流式、为什么先预检 ★ 见 app/zipstream.py 的模块头。
     """
@@ -177,17 +187,23 @@ async def api_share_zip(
         picked: list[tuple[Path, str]] = []
         seen: set[str] = set()
         for raw_name in item:
-            name = (raw_name or "").strip().replace("\\", "/")
-            # ★ 选择项只能是"当前目录下的一个名字" ★
-            #   带 / 或 .. 的一律拒 —— 真正的边界由 _resolve_in_share 兜底，
-            #   这里先挡是为了让报错**可读**（否则访客只会看到一个 403）。
-            if not name or "/" in name or name in (".", "..") or "\x00" in name:
+            # 反斜杠按分隔符归一（Windows 侧可能发过来），再去掉前导 `./`、`/`
+            name = (raw_name or "").strip().replace("\\", "/").lstrip("/")
+            while name.startswith("./"):
+                name = name[2:]
+            # ★ 只挡"结构性非法"，不挡 `/` ★
+            #   `..` 单独成段就必须拒（`a/../b` 归一后仍含有 `..` 段）。
+            #   这里拦是为了**报错可读**——就算漏掉，下面 _resolve_in_share
+            #   的越界断言也会把逃逸挡成 403。
+            parts = [seg for seg in name.split("/") if seg]
+            if not parts or "\x00" in name or any(seg in (".", "..") for seg in parts):
                 raise HTTPException(400, "非法的选择项")
+            name = "/".join(parts)          # 归一：去掉重复的 `/`
             if name in seen:
                 continue
             seen.add(name)
-            rel = f"{sub}/{name}" if sub else name
-            ip, _s, _f = _resolve_in_share(m, sh, rel)
+            # item 是**分享根**相对路径，与 path 无关 ⇒ 不再拼 sub 前缀
+            ip, _s, _f = _resolve_in_share(m, sh, name)
             picked.append((ip, name))
         if not picked:
             raise HTTPException(400, "没有选中任何项")
@@ -209,9 +225,10 @@ async def api_share_zip(
     except zipstream.ZipLimitExceeded as e:
         raise HTTPException(413, str(e)) from e
 
-    # 包名：整目录 → 目录名；勾一项 → 那一项的名字；勾多项 → 目录名-选中N项
+    # 包名：整目录 → 目录名；勾一项 → 那一项的名字（取末段，item 可能是 a/b/c.pdf）；
+    #       勾多项 → 目录名-选中N项
     if n_sel == 1:
-        base_name = item[0]
+        base_name = item[0].strip().replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
     elif n_sel > 1:
         base_name = f"{p.name or 'share'}-选中{n_sel}项"
     else:

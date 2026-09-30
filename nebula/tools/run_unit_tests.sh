@@ -33,6 +33,8 @@ winpath() {
 
 SUITES=(
   _test_controls.js
+  _test_window_controls.js
+  _test_modal_guard.js
   _test_refresh_ctx.js
   _test_visible_order.js
   _test_drag_buttons.js

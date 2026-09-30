@@ -48,12 +48,22 @@ async def api_share_create(
 
     ttl_days: 0 或负数 → 永不过期；默认 7 天。
     max_visits: 0 → 不限次数。
+
+    ★ 目标是**一个文件一条分享**（2026-10-01 用户要求）★
+      同一个 (owner, mount, path) 只会有一条：命中已存在且仍然有效的那条时，
+      参数被原地更新、**token 不变**（地址不变），响应里 `reused=True`。
+      命中已死掉的（过期 / 超次）则由 `shares.create` 撤销后新建 —— 那时
+      `reused=False`，因为返回的确实是一条新地址。
+      ⚠️ 前端据此决定文案：别对用户说"已创建"，他看到的是一条老链接。
     """
     m = _mount(user["username"], mount)
     p = files.resolve(m, path)          # 存在性 + 穿越校验 + 映射可见性
 
     is_dir = p.is_dir()
     name = p.name or mount
+
+    # ★ 先记下"之前有没有"：create 之后无法区分（同一条会被原地更新）★
+    before = shares.find_by_target(user["username"], mount, path)
 
     ttl = 0 if ttl_days <= 0 else int(ttl_days * 86400)
     sh = shares.create(
@@ -67,9 +77,11 @@ async def api_share_create(
         password=password,
         note=note,
     )
+    reused = bool(before and before.token == sh.token)
     users.audit(user["username"], "share", f"{mount}:{path}",
-                f"ttl={ttl}s visits={max_visits} pw={'yes' if password else 'no'}")
-    return {"ok": True, "share": sh.as_dict(origin=_origin(request))}
+                f"ttl={ttl}s visits={max_visits} pw={'yes' if password else 'no'}"
+                f" reused={'yes' if reused else 'no'}")
+    return {"ok": True, "reused": reused, "share": sh.as_dict(origin=_origin(request))}
 
 
 @router.post("/api/shares/revoke")

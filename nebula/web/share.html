@@ -19,62 +19,110 @@
      这样页面一打开就知道：token / 名称 / 是否目录 / 是否已解锁 / 是否有密码。 -->
 <script id="share-boot">window.__SHARE__ = __SHARE_BOOT__;</script>
 
+<!-- ==========================================================================
+     版式（2026-09-30 第三次重做，用户要求，逐条对应）：
+
+       a、最上面那个整条去掉，包括网盘 logo 都去掉；
+       b、预览窗口铺满整个页面；
+       c、每行右边显示 文件大小和下载图标，不显示日期；
+       d、文件树显示在左边，自动隐藏（不要太宽），鼠标靠边面板就可以从左边
+          显示出来，宽度可以手动调整；
+       e、多选下载按钮 也放到左边的面板上；
+       f、有固定图标，固定后就固定在边上，如果没有固定（在预览页面上面），
+          点击预览窗口，那文件树就自动隐藏。
+
+     ⇒ 结构只剩两层：
+          <main>   预览，position:absolute; inset:0 —— **真的铺满整页**
+          <aside>  左侧文件树，浮在预览之上，默认 translateX(-100%) 收起
+
+     ★ 为什么不再有"顶栏" ★
+       前两版都有一条常驻横带（品牌栏 → 全局动作栏）。用户的结论是
+       「最上面那个整条去掉」——那一条占掉的是**最贵的一行高度**
+       （所有内容都被往下推），而它承载的信息（我是谁、我在哪）完全可以
+       并进左面板的头部。去掉之后预览才可能真的"铺满整个页面"。
+     ========================================================================== -->
+
 <div id="share-app">
-  <!-- ★ 顶栏 + 导航条一起 sticky ★
-       —— 目录分享要一层层点进去看，「返回上一级」和面包屑必须**在视线附近**。
-       2026-09-30 用户反馈：原来这两个控件在**右下角**的页脚里，
-       每看一层都要把鼠标从列表拖到屏幕另一头，很难用；
-       而且目录分享当时压根没有下载出口（见下）。 -->
-  <div class="sh-top">
-  <!-- 顶栏 -->
-  <header class="sh-head">
-    <div class="sh-brand">
-      <svg viewBox="0 0 32 32" width="22" height="22" fill="none" aria-hidden="true">
-        <path d="M9 25a7 7 0 0 1 .7-13.9A8.8 8.8 0 0 1 26 13.3 6.4 6.4 0 0 1 25.3 25z"
-              fill="currentColor" fill-opacity=".9"/>
-      </svg>
-      <span>NebulaDisk 分享</span>
-    </div>
-    <div class="sh-meta" id="sh-meta"></div>
-  </header>
 
-  <!-- 导航条：面包屑 + 上一级 + 全选 + 打包下载（仅目录分享渲染） -->
-  <div class="sh-nav" id="sh-nav" hidden>
-    <button class="btn sh-up" id="sh-up" hidden>
-      <svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true">
-        <path d="M10 3.2 5.2 8l4.8 4.8" stroke="currentColor" stroke-width="1.7"
-              stroke-linecap="round" stroke-linejoin="round"/>
-      </svg>
-      <span>上一级</span>
-    </button>
-    <button class="btn sh-selall" id="sh-selall" hidden>全选</button>
-    <span id="sh-path" title=""></span>
-    <button class="btn sh-zip" id="sh-zip" hidden>
-      <svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true">
-        <path d="M8 2v7m0 0 3-3M8 9 5 6M3 12.5h10" stroke="currentColor" stroke-width="1.6"
-              stroke-linecap="round" stroke-linejoin="round"/>
-      </svg>
-      <span>打包下载</span>
-    </button>
-  </div>
-  </div>
-
-  <!-- 主体：由 JS 按状态渲染（loading / error / locked / browse） -->
+  <!-- 预览区：铺满整页。z-index 最低，左面板浮在它上面 -->
   <main class="sh-main" id="sh-main">
     <div class="sh-center">
       <div class="spinner"></div>
       <div class="sh-dim">正在载入…</div>
     </div>
   </main>
-</div>
 
-<!-- 预览浮层 -->
-<div class="sh-viewer" id="sh-viewer" hidden>
-  <div class="sh-viewer-bar">
-    <span id="sh-viewer-name"></span>
-    <button class="btn" id="sh-viewer-close">关闭</button>
+  <!-- 左侧文件树面板（可滑出 / 可固定 / 可拖宽） -->
+  <aside class="sh-tree" id="sh-tree" data-open="false" data-pinned="false"
+         aria-label="文件树">
+    <div class="sh-tree-in">
+
+      <!-- 头部：分享身份（原来的信息卡内容，压缩成一行 + 一行小字）
+           —— 顶栏去掉之后，"这是什么"就靠这里回答 -->
+      <div class="sh-tree-head">
+        <span class="sh-tree-ico" id="sh-id-icon" aria-hidden="true"></span>
+        <div class="sh-tree-id">
+          <div class="sh-tree-name" id="sh-id-name" title="">文件分享</div>
+          <div class="sh-tree-sub" id="sh-id-sub"></div>
+        </div>
+        <!-- f：固定图标。图标本身是"图钉"，按下后 aria-pressed=true -->
+        <button type="button" class="sh-pin" id="sh-pin" aria-pressed="false"
+                title="固定面板（固定后不会自动收起）">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" aria-hidden="true">
+            <path d="M9 3.6h6l-.9 4.6 3.6 3.6-5 .9-3.7 4.7-3.6-3.6 3.7-4.2z"
+                  stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+            <path d="m7 15.9-3.3 3.3" stroke="currentColor" stroke-width="1.5"
+                  stroke-linecap="round"/>
+          </svg>
+        </button>
+      </div>
+
+      <div class="sh-tree-chips" id="sh-chips"></div>
+
+      <!-- 树本体（JS 递归渲染） -->
+      <div class="sh-tree-scroll" id="sh-tree-body" role="tree"></div>
+
+      <!-- e：多选下载按钮放在**左面板底部**（原来是页面顶部那条栏里的） -->
+      <div class="sh-tree-foot">
+        <label class="sh-all">
+          <input type="checkbox" id="sh-selall">
+          <span id="sh-all-label">全选</span>
+        </label>
+        <button type="button" class="sh-zip" id="sh-zip" disabled>
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true">
+            <path d="M8 2.2v7.2m0 0 2.9-2.9M8 9.4 5.1 6.5M3 12.6h10" stroke="currentColor"
+                  stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span id="sh-zip-label">打包下载</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- d：宽度可手动调整。手柄在面板**右缘** -->
+    <div class="sh-grip" id="sh-grip" role="separator" aria-orientation="vertical"
+         title="拖动调整面板宽度"></div>
+  </aside>
+
+  <!-- 左边缘热区：面板收起时，鼠标靠过来就滑出。
+       ★ 必须 z-index 高于预览 ★ 否则鼠标落在 iframe（kk/CAD/OnlyOffice）
+         上时，父文档收不到 mouseenter，面板就再也拉不出来。
+       ★ 必须排在 </aside> **之后** ★ share.css 靠
+         `.sh-tree[data-open="true"] ~ .sh-edge` 把提示条淡出，
+         而 `~` 只向后找兄弟节点 —— 放在 aside 前面这条规则永远不会命中。 -->
+  <div class="sh-edge" id="sh-edge" aria-hidden="true"></div>
+
+  <!-- 单文件分享用的浮动下载按钮（不占整条，只是一枚浮动小按钮） -->
+  <div class="sh-float" id="sh-float" hidden>
+    <span class="sh-float-name" id="sh-float-name"></span>
+    <a class="sh-float-dl" id="sh-float-dl" download>
+      <svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true">
+        <path d="M8 2.2v7.2m0 0 2.9-2.9M8 9.4 5.1 6.5M3 12.6h10" stroke="currentColor"
+              stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span>下载</span>
+    </a>
   </div>
-  <div class="sh-viewer-body" id="sh-viewer-body"></div>
+
 </div>
 
 <div class="sh-toast" id="sh-toast" hidden></div>

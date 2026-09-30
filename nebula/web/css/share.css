@@ -1,49 +1,117 @@
 /* ==========================================================================
-   NebulaDisk —— 分享落地页样式
-   --------------------------------------------------------------------------
-   设计约束：
-     1. **自包含**：访客可能未登录、可能来自外部，不依赖 SPA 的 app.css
-        里那些只有桌面才需要的规则（窗口/任务栏/图标层…）。
-        但**配色变量沿用同一套**，保证是"一家人"。
-     2. **移动优先可用**：分享链接常被微信/手机打开，表格要能横向滚，
-        按钮要够大（≥40px 触摸目标）。
-     3. **深色自适应**：跟系统主题走（prefers-color-scheme），
-        因为访客没法去点"切换主题"。
+   NebulaDisk —— 分享落地页样式（2026-09-30 第三次重做）
+
+   ★ 这一版跟上一版的区别（用户逐条列了 a~f，这里逐条对应）★
+     a、最上面那个整条去掉，包括网盘 logo 都去掉；
+     b、预览窗口铺满整个页面；
+     c、每行右边显示 文件大小和下载图标，不显示日期；
+     d、文件树显示在左边，自动隐藏（不要太宽），鼠标靠边面板就可以从左边
+        显示出来，宽度可以手动调整；
+     e、多选下载按钮 也放到左边的面板上；
+     f、有固定图标，固定后就固定在边上，如果没有固定，点击预览窗口，
+        那文件树就自动隐藏。
+
+   ⇒ 结构只剩两层：铺满整页的 <main> + 浮在它上面的 <aside> 文件树。
+
+   ★ 为什么前两版都不行（避免第四次再走回头路）★
+     第 1 版：品牌栏 + 导航条 + 裸表格 —— 三条横带，信息只有一条。
+     第 2 版：把三条压成两条（顶栏 + 信息卡），列表做了类型着色。
+             信息层级是好了，但**顶栏仍然常驻**。
+             用户的原话是「最上面那个整条去掉，包括网盘 logo 都去掉」。
+     ⇒ 结论：问题不在"顶栏里放了什么"，而在"有一条常驻横带"本身 ——
+       它把所有内容往下推，预览就永远不可能"铺满整个页面"。
+       所以这一版把身份信息**并进左面板头部**，页面上不再有任何常驻横带。
+
+   ⚠️ 三条不能破的约定（有测试盯着，见 tools/_test_shares.py 第 16 节）：
+      · `[hidden]` 必须真的隐藏（见下，作者样式会盖掉 UA 的 display:none）；
+      · share.js 顶层 `$('id')` 引用的每个 id，这里都要有；
+      · 十个 `.sh-ico.k-*` 类型色必须齐全。
    ========================================================================== */
 
 :root {
   --accent:        #0067c0;
-  --accent-hover:  #1975c5;
-  --bg-page:       #f3f3f3;
+  --accent-hover:  #1a76c9;
+  --accent-soft:   rgba(0, 103, 192, 0.10);
+  --accent-line:   rgba(0, 103, 192, 0.35);
+
+  --bg-page:       #f4f6fa;
   --bg-card:       #ffffff;
-  --bg-hover:      rgba(0, 0, 0, 0.045);
-  --bg-selected:   rgba(0, 103, 192, 0.11);
-  --text:          #1b1b1b;
-  --text-2:        #5c5c5c;
-  --text-3:        #8a8a8a;
-  --border:        rgba(0, 0, 0, 0.09);
-  --border-strong: rgba(0, 0, 0, 0.16);
+  --bg-sunken:     #f7f8fa;
+  --bg-hover:      rgba(15, 23, 42, 0.045);
+  --bg-selected:   rgba(0, 103, 192, 0.10);
+  --bg-edge:       rgba(16, 24, 40, 0.20);
+
+  --text:          #101828;
+  --text-2:        #475467;
+  --text-3:        #98a2b3;
+  --border:        rgba(16, 24, 40, 0.09);
+  --border-strong: rgba(16, 24, 40, 0.16);
+  --panel:         rgba(255, 255, 255, 0.94);
+
   --danger:        #c42b1c;
   --ok:            #0f7b0f;
-  --radius:        8px;
-  --shadow:        0 6px 20px rgba(0,0,0,.10), 0 1px 2px rgba(0,0,0,.07);
-  --ease:          cubic-bezier(0.2, 0, 0, 1);
+
+  /* 类型色：树里靠它一眼认出"这是什么文件" */
+  --c-dir:     #dfa02c;
+  --c-image:   #22955f;
+  --c-video:   #7c4dff;
+  --c-audio:   #dd6b20;
+  --c-text:    #5b6b7f;
+  --c-doc:     #2b6cb0;
+  --c-pdf:     #c03028;
+  --c-cad:     #0e7490;
+  --c-archive: #9a6700;
+  --c-file:    #98a2b3;
+
+  --radius-sm: 8px;
+  --radius:    12px;
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, .06), 0 1px 1px rgba(16, 24, 40, .04);
+  --shadow:    0 8px 24px rgba(16, 24, 40, .09), 0 1px 2px rgba(16, 24, 40, .05);
+  --shadow-lg: 0 18px 48px rgba(16, 24, 40, .22);
+  --ease:      cubic-bezier(0.2, 0, 0, 1);
+
+  /* ★ 面板宽度由 JS 写在这个变量上（拖动右缘手柄改它）★
+     默认 268px —— 用户要求"不要太宽"。 */
+  --sh-tree-w: 268px;
+  /* 左边缘热区宽度：面板收起时靠它把面板"拉"出来 */
+  --sh-edge-w: 12px;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
     --accent:        #4cc2ff;
-    --accent-hover:  #63c9ff;
-    --bg-page:       #1a1a1a;
-    --bg-card:       #262626;
-    --bg-hover:      rgba(255, 255, 255, 0.07);
-    --bg-selected:   rgba(76, 194, 255, 0.16);
-    --text:          #f2f2f2;
-    --text-2:        #c4c4c4;
-    --text-3:        #8f8f8f;
+    --accent-hover:  #6ecbff;
+    --accent-soft:   rgba(76, 194, 255, 0.14);
+    --accent-line:   rgba(76, 194, 255, 0.42);
+
+    --bg-page:       #15171b;
+    --bg-card:       #212429;
+    --bg-sunken:     #1a1d21;
+    --bg-hover:      rgba(255, 255, 255, 0.06);
+    --bg-selected:   rgba(76, 194, 255, 0.14);
+    --bg-edge:       rgba(255, 255, 255, 0.28);
+
+    --text:          #f0f3f7;
+    --text-2:        #b9c1cc;
+    --text-3:        #7f8895;
     --border:        rgba(255, 255, 255, 0.10);
     --border-strong: rgba(255, 255, 255, 0.18);
-    --shadow:        0 6px 20px rgba(0,0,0,.45), 0 1px 2px rgba(0,0,0,.30);
+    --panel:         rgba(28, 31, 36, 0.95);
+
+    --c-dir:     #e0ac47;
+    --c-image:   #3fb37a;
+    --c-video:   #9b7bff;
+    --c-audio:   #ef8b4a;
+    --c-text:    #8ea0b5;
+    --c-doc:     #5b9bd5;
+    --c-pdf:     #e06a60;
+    --c-cad:     #35a3bd;
+    --c-archive: #c39a2e;
+    --c-file:    #7f8895;
+
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, .5);
+    --shadow:    0 8px 24px rgba(0, 0, 0, .45), 0 1px 2px rgba(0, 0, 0, .4);
+    --shadow-lg: 0 18px 48px rgba(0, 0, 0, .6);
   }
 }
 
@@ -52,222 +120,497 @@
 /* ★★★ `hidden` 属性必须真的隐藏（2026-09-30 修，实测事故）★★★
    浏览器给 `[hidden]` 的 `display: none` 来自 **UA 样式表**，
    而任何**作者样式**里的 `display:` 声明都会把它盖掉（作者 > UA，不看特异性）。
-   本文件里 `.sh-viewer` 就是 `display: flex`：
+   本文件里 `.sh-float` 就是 `display: flex`：
 
-       <div class="sh-viewer" id="sh-viewer" hidden>   ← 想让它默认不显示
-       .sh-viewer { display: flex; ... }               ← 把它又显示了出来
+       <div class="sh-float" id="sh-float" hidden>   ← 想让它默认不显示
+       .sh-float { display: flex; }                  ← 这一行会让它照样显示
 
-   后果：分享落地页**一打开就被预览浮层盖住** ——
-   一整屏半透明黑 + 一块空白的白色面板，什么都看不到；
-   JS 里 `viewer.hidden = true/false` 完全失效（属性变了、渲染没变），
-   于是连"点关闭"也没用。用户报障就是这张图。
-   ⇒ 用 `!important` 把 `[hidden]` 钉死。这一条同时对**将来**新增的
-     `display:` 规则免疫 —— 只要元素带了 hidden 就一定不显示。
-   ⚠️ 不要把这条只写在 `.sh-viewer` 上：那是"修一个漏一个"，
-      凡是走 hidden 切换的元素（#sh-nav / #sh-up / #sh-zip / #sh-toast …）
-      都要受它保护。 */
+   于是弹层/浮动条永远挂在页面上，直接盖住内容。
+   加一条 `!important` 把这个洞堵死 —— 全站只此一处，语义清晰。
+   ⚠️ 新增任何 `display:` 规则前，先想清楚它会不会盖掉 `hidden`。 */
 [hidden] { display: none !important; }
 
 html, body {
-  margin: 0;
-  min-height: 100%;
+  margin: 0; padding: 0;
+  height: 100%;
+  /* 分享页是"预览铺满整页"，页面自身不滚动 —— 滚动交给主区/面板内部 */
+  overflow: hidden;
+}
+
+body {
   background: var(--bg-page);
   color: var(--text);
-  font: 14px/1.55 "Segoe UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, "PingFang SC",
+               "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+  font-size: 13.5px;
+  line-height: 1.5;
   -webkit-font-smoothing: antialiased;
 }
 
-#share-app { min-height: 100vh; display: flex; flex-direction: column; }
+#share-app { position: fixed; inset: 0; overflow: hidden; }
 
-/* ---- 顶栏 + 导航条（一起 sticky）---- */
-/*   ★ 为什么把 sticky 挪到外层容器 ★
-     导航条要贴在顶栏**下面**。若各自 sticky，就得给导航条写一个
-     `top: <顶栏高度>` 的魔法数字 —— 字号/内边距一改就错位。
-     套一个 sticky 容器，浏览器自己算，永远不会错。 */
-.sh-top { position: sticky; top: 0; z-index: 5; }
+/* ==========================================================================
+   一、预览区：铺满整个页面（b）
 
-.sh-head {
-  display: flex; align-items: center; gap: 12px;
-  padding: 12px 18px;
+   ★ position:absolute; inset:0 —— 不是 flex:1，也不留任何外边距 ★
+     用户要求「预览窗口铺满整个页面」。用 absolute + inset 的好处是：
+     它**不参与**和左面板的横向布局，左面板因此可以做成"浮在上面的抽屉"，
+     收起/滑出都不会让预览区发生任何位移（否则每次拉面板预览都要重排、
+     iframe 会闪一下白）。
+   ========================================================================== */
+.sh-main {
+  position: absolute; inset: 0;
+  overflow: auto;
+  background: var(--bg-sunken);
+  display: flex;
+}
+
+/* 各种预览都撑满主区 */
+.sh-main > img,
+.sh-main > video {
+  display: block;
+  width: 100%; height: 100%;
+  object-fit: contain;          /* 不裁切：图纸/截图这类要能看全 */
+  border: 0;
+  background: #0b0d10;          /* 图片/视频四周的留白用深色，不刺眼 */
+}
+.sh-main > iframe {
+  display: block;
+  width: 100%; height: 100%;
+  border: 0;
+}
+.sh-main > .sh-fill { flex: 1 1 auto; min-width: 0; min-height: 0; }
+.sh-main > .sh-media-wrap {
+  flex: 1 1 auto; min-height: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: #0b0d10;
+}
+.sh-main video.sh-media, .sh-main audio.sh-media { max-width: 100%; max-height: 100%; }
+.sh-main audio.sh-media { width: min(560px, 80%); }
+
+.sh-main > .sh-text {
+  flex: 1 1 auto; min-width: 0; min-height: 0;
+  margin: 0;
+  padding: 18px 22px;
+  overflow: auto;
   background: var(--bg-card);
-  border-bottom: 1px solid var(--border);
-}
-.sh-brand { display: flex; align-items: center; gap: 8px; font-weight: 600; color: var(--accent); }
-.sh-brand svg { fill: var(--accent); }
-.sh-meta { margin-left: auto; color: var(--text-3); font-size: 12.5px; text-align: right; }
-.sh-meta b { color: var(--text-2); font-weight: 600; }
-
-/* ---- 导航条（面包屑 + 上一级 + 打包下载）----
-   仅**目录分享**出现；单文件分享的卡片自带「预览 / 下载」，不必再来一条。 */
-.sh-nav {
-  display: flex; align-items: center; gap: 10px;
-  padding: 9px 18px;
-  background: var(--bg-card);
-  border-bottom: 1px solid var(--border);
-}
-.sh-nav .btn {
-  height: 34px; padding: 0 12px; font-size: 13px;
-  display: inline-flex; align-items: center; gap: 5px;
-  flex: 0 0 auto;
-}
-.sh-nav .sh-zip { margin-left: auto; }    /* 与面包屑拉开，靠右 */
-.sh-nav .btn svg { flex: 0 0 auto; }
-#sh-path {
-  color: var(--text-2); font-size: 13px; overflow: hidden;
-  text-overflow: ellipsis; white-space: nowrap; min-width: 0;
-  flex: 1 1 auto;
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 12.5px; line-height: 1.65;
+  white-space: pre-wrap; word-break: break-word;
+  tab-size: 4;
 }
 
-/* ---- 主体 ---- */
-.sh-main { flex: 1; padding: 20px; max-width: 1180px; width: 100%; margin: 0 auto; }
-
+/* 居中态（载入中 / 空 / 错误 / 提取码） */
 .sh-center {
+  flex: 1 1 auto; min-height: 0;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 12px; padding: 64px 20px; text-align: center;
+  gap: 12px; padding: 28px; text-align: center;
 }
-.sh-dim { color: var(--text-3); }
+.sh-dim { color: var(--text-3); font-size: 13px; }
+.sh-full { font-size: 14px; color: var(--text-2); max-width: 460px; }
 
 .spinner {
-  width: 28px; height: 28px; border-radius: 50%;
-  border: 3px solid var(--border-strong);
+  width: 26px; height: 26px; border-radius: 50%;
+  border: 2.5px solid var(--border-strong);
   border-top-color: var(--accent);
-  animation: spin .8s linear infinite;
+  animation: spin .85s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* ---- 卡片 ---- */
-.sh-card {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-  padding: 22px;
-  max-width: 460px;
-  margin: 40px auto;
-}
-.sh-card h2 { margin: 0 0 6px; font-size: 17px; }
-.sh-card p  { margin: 0 0 16px; color: var(--text-2); }
-.sh-card .field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
-.sh-card input {
-  height: 40px; padding: 0 12px;
-  border: 1px solid var(--border-strong); border-radius: 6px;
-  background: var(--bg-page); color: var(--text); font: inherit;
-}
-.sh-card input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+/* ==========================================================================
+   二、左侧文件树面板（d / e / f）
 
-/* ---- 按钮 ---- */
-.btn {
-  height: 40px; padding: 0 16px;
-  border: 1px solid var(--border-strong); border-radius: 6px;
-  background: var(--bg-card); color: var(--text); font: inherit; font-weight: 500;
-  cursor: pointer; transition: background var(--ease) 120ms, border-color 120ms;
+   收起时 translateX(-100%) —— 完全移出视口，但仍保留 box-shadow 的过渡，
+   滑出用 transform（不触发布局），因此不会拖慢 iframe 预览。
+   打开条件：鼠标进入左边缘热区 / 进入面板本身 / 面板被固定。
+   ========================================================================== */
+.sh-tree {
+  position: absolute; top: 0; bottom: 0; left: 0;
+  z-index: 30;
+  width: var(--sh-tree-w);
+  max-width: 92vw;              /* 窄屏保护：不许盖满整页 */
+  display: flex; flex-direction: row;
+  background: var(--panel);
+  backdrop-filter: blur(14px) saturate(150%);
+  border-right: 1px solid var(--border);
+  box-shadow: var(--shadow-lg);
+  transform: translateX(-100%);
+  transition: transform .22s var(--ease);
 }
-.btn:hover { background: var(--bg-hover); }
-.btn:active { transform: translateY(1px); }
-.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-.btn.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
-.btn:disabled { opacity: .5; cursor: default; }
+.sh-tree[data-open="true"] { transform: translateX(0); }
+/* 拖动改宽度时关掉过渡，否则手柄会"追不上"鼠标 */
+.sh-tree.no-anim { transition: none; }
 
-/* ---- 文件列表 ---- */
-.sh-list {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+.sh-tree-in {
+  flex: 1 1 auto; min-width: 0;
+  display: flex; flex-direction: column;
+  padding: 10px 10px 0;
   overflow: hidden;
 }
-.sh-row {
-  display: grid;
-  /* 第一列是勾选框（勾几项 → 打包下载）。见下方 .sh-check */
-  grid-template-columns: 26px 1fr 110px 150px;
-  gap: 10px;
-  align-items: center;
-  padding: 11px 16px 11px 12px;
-  border-bottom: 1px solid var(--border);
-  cursor: default;
-}
-.sh-row:last-child { border-bottom: 0; }
-.sh-row:hover { background: var(--bg-hover); }
-.sh-row.is-selected { background: var(--bg-selected); }
 
-/* 勾选框：点它 = 加/减选择集（不触发行点击的"单选"语义）。
-   accent-color 让原生复选框直接用主题色，省掉自绘的几十行。 */
-.sh-check { display: flex; align-items: center; justify-content: center; padding: 3px 0; }
-.sh-cb {
-  width: 17px; height: 17px; margin: 0; flex: 0 0 auto;
-  cursor: pointer; accent-color: var(--accent);
-}
-.sh-name {
+/* 头部：分享身份（顶栏去掉后，"这是什么"由这里回答） */
+.sh-tree-head {
   display: flex; align-items: center; gap: 9px;
-  min-width: 0;
+  padding: 4px 4px 9px;
+  border-bottom: 1px solid var(--border);
 }
-.sh-name .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sh-ico { flex: 0 0 auto; width: 20px; height: 20px; color: var(--text-3); }
-.sh-ico.dir { color: var(--accent); }
-.sh-size, .sh-time { color: var(--text-3); font-size: 12.5px; text-align: right; }
-.sh-row.dir .sh-size { visibility: hidden; }
+.sh-tree-ico {
+  flex: 0 0 30px; width: 30px; height: 30px;
+  display: grid; place-items: center;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+}
+.sh-tree-ico svg { width: 19px; height: 19px; }
+.sh-tree-id { flex: 1 1 auto; min-width: 0; }
+.sh-tree-name {
+  font-size: 13.5px; font-weight: 600; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sh-tree-sub {
+  font-size: 11.5px; color: var(--text-3); margin-top: 1px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sh-tree-sub:empty { display: none; }
 
-/* 移动端：隐藏大小/时间，只留文件名（避免横向挤压） */
-@media (max-width: 620px) {
-  .sh-row { grid-template-columns: 26px 1fr; }
-  .sh-size, .sh-time { display: none; }
-  .sh-main { padding: 12px; }
-  .sh-nav { padding: 8px 12px; gap: 8px; }
-  /* 窄屏不藏按钮文字（图标认不出来），改为压缩内边距；
-     面包屑自己有 ellipsis + min-width:0，会先让位。 */
-  .sh-nav .btn { padding: 0 10px; }
+/* f：固定图标 */
+.sh-pin {
+  flex: 0 0 auto;
+  width: 26px; height: 26px;
+  display: grid; place-items: center;
+  border: 1px solid transparent; border-radius: var(--radius-sm);
+  background: transparent; color: var(--text-3);
+  cursor: pointer;
+  transition: background .12s, color .12s, border-color .12s;
 }
+.sh-pin:hover { background: var(--bg-hover); color: var(--text); }
+.sh-pin[aria-pressed="true"] {
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+  color: var(--accent);
+}
+/* 固定后图钉的钉帽"按下去"：旋转一点，加上实心底色 */
+.sh-pin[aria-pressed="true"] svg { transform: rotate(-20deg); }
+.sh-pin svg { transition: transform .16s var(--ease); }
 
-/* ---- 底栏已移除（2026-09-30）----
-   原 `.sh-foot` 把「面包屑 + 上一级 + 下载」放在**右下角**。目录分享逐层浏览时
-   很难用（用户报障原话：「上一级目前在最右下角，操作起来很不方便」），
-   现已整体上移到顶部的 .sh-nav。
-   ⚠️ 别再把导航类控件放回底部 —— 列表在左上方，操作在右下角，
-      中间隔着整屏的鼠标移动距离。 */
+.sh-tree-chips {
+  display: flex; flex-wrap: wrap; gap: 4px;
+  padding: 8px 4px 8px;
+}
+.sh-tree-chips:empty { display: none; }
+.sh-chip {
+  font-size: 11px; line-height: 1.7;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--bg-hover);
+  color: var(--text-3);
+  white-space: nowrap;
+}
+.sh-chip.warn { background: rgba(196, 43, 28, .10); color: var(--danger); }
 
-/* ---- 预览浮层 ---- */
-.sh-viewer {
-  position: fixed; inset: 0; z-index: 40;
-  background: rgba(0,0,0,.62);
-  display: flex; flex-direction: column;
-  padding: 3vh 3vw;
-}
-.sh-viewer-bar {
-  display: flex; align-items: center; gap: 12px;
-  padding-bottom: 10px; color: #fff; font-weight: 600;
-}
-.sh-viewer-bar .btn { margin-left: auto; background: rgba(255,255,255,.14); color: #fff; border-color: rgba(255,255,255,.3); }
-.sh-viewer-body {
-  flex: 1; min-height: 0;
-  background: #fff; border-radius: var(--radius); overflow: hidden;
-}
-.sh-viewer-body iframe { width: 100%; height: 100%; border: 0; display: block; }
-.sh-viewer-body img {
-  max-width: 100%; max-height: 100%; display: block; margin: auto; object-fit: contain;
-}
-
-/* ---- 原生媒体 / 文本（与网盘「浏览器原生预览」同一条腿）----
-   ★ 视频与音频用深色舞台 ★
-     浮层主体是白底，视频黑边会显得像"没加载出来"；音频则只占一小条。
-     深色底 + 居中，与网盘 viewer.js 的 .media-stage 观感一致。 */
-.sh-media-wrap {
-  width: 100%; height: 100%;
-  display: flex; align-items: center; justify-content: center;
-  background: #0f0f0f;
-}
-.sh-media-wrap .spinner { border-color: rgba(255,255,255,.25); border-top-color: #fff; }
-.sh-viewer-body .sh-media { max-width: 100%; max-height: 100%; display: block; }
-.sh-viewer-body audio.sh-media { width: min(520px, 88%); height: 54px; }
-.sh-text {
-  margin: 0; width: 100%; height: 100%; overflow: auto; box-sizing: border-box;
-  padding: 14px 16px; background: #fff; color: #222;
-  font: 12.5px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, "Courier New", monospace;
-  white-space: pre-wrap; word-break: break-word;
+/* 树本体 */
+.sh-tree-scroll {
+  flex: 1 1 auto; min-height: 0;
+  overflow: auto;
+  padding-bottom: 8px;
 }
 
-/* ---- Toast ---- */
+/* ---- 树行 ----
+   ★ 每行右侧 = 大小 + 下载图标，**没有日期**（用户第 c 条）★ */
+.sh-node {
+  display: flex; align-items: center; gap: 6px;
+  height: 28px;
+  padding: 0 4px 0 2px;
+  border-radius: 6px;
+  cursor: default;
+  user-select: none;
+  white-space: nowrap;
+}
+.sh-node:hover { background: var(--bg-hover); }
+.sh-node.is-current { background: var(--bg-selected); }
+.sh-node.is-picked { background: var(--bg-selected); }
+
+.sh-twist {
+  flex: 0 0 16px; width: 16px; height: 16px;
+  display: grid; place-items: center;
+  border: 0; padding: 0; background: transparent;
+  color: var(--text-3); cursor: pointer;
+}
+.sh-twist svg { width: 11px; height: 11px; transition: transform .14s var(--ease); }
+.sh-node[data-open="true"] .sh-twist svg { transform: rotate(90deg); }
+.sh-twist.leaf { visibility: hidden; }   /* 文件行占位，保证缩进对齐 */
+
+.sh-node .sh-cb {
+  flex: 0 0 13px; width: 13px; height: 13px;
+  margin: 0; cursor: pointer;
+}
+
+.sh-node .sh-ico { flex: 0 0 15px; width: 15px; height: 15px; }
+.sh-node .nm {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis;
+  font-size: 12.5px; color: var(--text);
+}
+.sh-node .sz {
+  flex: 0 0 auto;
+  font-size: 11px; color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  padding-left: 4px;
+}
+.sh-node .sh-row-dl {
+  flex: 0 0 22px; width: 22px; height: 22px;
+  display: grid; place-items: center;
+  border: 0; border-radius: 5px; padding: 0;
+  background: transparent; color: var(--text-3);
+  cursor: pointer;
+  /* ★ 常显（不是 hover 才出现）★
+     分享页的访客只有一个目的：把文件拿走。把下载按钮藏到 hover 后面，
+     触屏和"没耐心悬停"的人就找不到它 —— 这是上一版被抱怨过的点。 */
+  opacity: .55;
+  transition: opacity .12s, background .12s, color .12s;
+}
+.sh-node:hover .sh-row-dl { opacity: 1; }
+.sh-node .sh-row-dl:hover { background: var(--accent-soft); color: var(--accent); }
+.sh-node .sh-row-dl svg { width: 14px; height: 14px; }
+
+/* 缩进由内联 padding-left 控制（层级是运行期才知道的） */
+.sh-node-loading, .sh-node-empty {
+  font-size: 11.5px; color: var(--text-3);
+  padding: 3px 8px;
+}
+
+/* ---- 底部：多选下载（e）---- */
+.sh-tree-foot {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 4px 11px;
+  border-top: 1px solid var(--border);
+  margin-top: 2px;
+}
+.sh-all {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 12px; color: var(--text-2);
+  cursor: pointer; white-space: nowrap;
+}
+.sh-all input { width: 13px; height: 13px; margin: 0; cursor: pointer; }
+.sh-zip {
+  flex: 1 1 auto; min-width: 0;
+  display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  height: 30px; padding: 0 10px;
+  border: 1px solid var(--accent); border-radius: var(--radius-sm);
+  background: var(--accent); color: #fff;
+  font-size: 12.5px; font-family: inherit;
+  cursor: pointer;
+  transition: background .12s, border-color .12s, opacity .12s;
+}
+.sh-zip:hover:not([disabled]) { background: var(--accent-hover); border-color: var(--accent-hover); }
+.sh-zip[disabled] { background: var(--bg-card); border-color: var(--border); color: var(--text-3); cursor: default; }
+.sh-zip svg { width: 14px; height: 14px; }
+.sh-zip span { overflow: hidden; text-overflow: ellipsis; }
+
+/* 拖宽手柄（d） */
+/* 拖宽手柄（d）：**可抓区域 14px**，视觉上仍是一条 2px 细线。
+   —— 原来只有 6px 的缝，用户得"骑"在上面才抓得到，这正是"操作有点问题"。
+   用负 margin 把 14px 全部压在内容右缘：面板宽度（--sh-tree-w）保持不变，
+   不会因为加宽手柄而把内容挤窄。`touch-action:none` 让触屏/触控板拖拽不触发滚动。 */
+.sh-grip {
+  flex: 0 0 14px; width: 14px;
+  margin-left: -14px;
+  cursor: col-resize;
+  touch-action: none;
+  background: transparent;
+  position: relative;
+  z-index: 1;                   /* 压在 .sh-tree-in 之上，保证抓得到 */
+}
+.sh-grip::after {
+  content: ''; position: absolute; inset: 0 6px;   /* 14-6-6 = 2px 视觉线 */
+  background: transparent; border-radius: 3px;
+  transition: background .12s;
+}
+.sh-grip:hover::after, .sh-grip.is-dragging::after { background: var(--accent-line); }
+
+/* ★ 拖拽期间：整个页面都是"左右拖"光标 ★
+   （拖出面板范围、甚至压到预览区 iframe 上时，光标也不许变回箭头；
+     同时把预览区 pointer-events 关掉，避免 iframe 抢指针/抢光标。） */
+html.is-grip-drag,
+html.is-grip-drag * { cursor: col-resize !important; }
+html.is-grip-drag * { user-select: none !important; }
+html.is-grip-drag #sh-main { pointer-events: none; }
+
+/* 左边缘热区（d） */
+.sh-edge {
+  position: absolute; top: 0; bottom: 0; left: 0;
+  width: var(--sh-edge-w);
+  z-index: 25;
+  /* 常显一条极淡的提示条，让访客知道左边有东西 —— 完全隐形的话
+     "鼠标靠边就能滑出"这个交互没人会发现。 */
+  background: linear-gradient(to right, var(--bg-edge), transparent);
+  opacity: .35;
+  transition: opacity .18s var(--ease);
+}
+.sh-edge:hover { opacity: 1; }
+/* 面板已打开时热区被面板盖住；固定状态下也不需要它 */
+.sh-tree[data-open="true"] ~ .sh-edge,
+.sh-tree[data-pinned="true"] ~ .sh-edge { opacity: 0; pointer-events: none; }
+
+/* ==========================================================================
+   三、单文件分享：不要文件树，只用一枚浮动「文件名 + 下载」
+   （不占"整条"，所以不违反 a 条）
+
+   ★★ 位置：**显示区的右下角**（2026-10-01 用户要求，原文）★★
+       「所有单文件分享界面 文件名 和 下载按钮 放到显示区域的右下角。
+        包括OO」
+     ⇒ 单文件分享时主区就是整页（`#sh-main` 是 inset:0），所以右下角
+       = 视口右下角，留 16px 边距。
+
+   ★ 为什么用 `right/bottom` 而不是 `left/top` ★
+     这枚浮动条是**覆盖在预览之上**的。左上角是"内容开始的地方"
+     （文字预览、图片、以及 OO 自己的工具栏都在上边），压在左上会挡内容；
+     右下角是预览里最"安静"的一块，且离"下载"这个动作的手势位置最近。
+
+   ★★ 包括 OO ★★
+     OnlyOffice 虽然自带下载按钮，但用户明确要求这里**也要有**
+     （「包括OO」）—— 于是这一条对 OO 单文件分享同样生效，
+     `share.js` 不得为 OO 单独把这条隐藏。
+   ⚠️ z-index 必须高于主区，否则会被 OO / kk / CAD 的 iframe 盖住
+      （iframe 是同层里的独立文档，父文档的普通元素压不住它）。
+
+   ★★★ 底边距：44px → 25px（2026-10-01 用户第三次反馈）★★★
+     第二次反馈：把底边距从 16px 抬到 44px，让开 OO 底部状态栏。
+     但 44px 是「16（原边距）+ 26（估的状态栏高）+ 2（余量）」估出来的，
+     状态栏高度**没有实测** ⇒ 让是让开了，却留了一段肉眼可见的空隙。
+     用户原话：「间留出约 29px 空隙 太大了。调整为 0。」
+
+   ★ 25px 是**逐像素量出来的**，不是估的（2026-10-01）★
+     手法：`.verify/probe-oo-rowscan.mjs` —— OO 的 iframe 是**跨源**
+     （http://localhost:8082/...，contentDocument 读不到），拿不到状态栏的
+      DOM 高度；于是把整页截图**喂回页面里的 canvas**（data: URL 不污染
+     canvas），逐行读 RGB，把状态栏上边界钉死到一个确定的行：
+
+          行 874   x=300 → 238,238,238   x=1000 → 255,255,255   ← 编辑器区
+          行 875   x=300 → 203,203,203   x=1000 → 203,203,203   ← 状态栏上边框
+          行 876+  x=300 → 247,247,247   x=1000 → 247,247,247   ← 状态栏底色
+
+     视口高 900 ⇒ 状态栏占 875..899 行 = **25px** ⇒ `bottom: 25px` 时
+     浮动条下边缘正好落在 y=875，与状态栏上边框**严丝合缝、空隙为 0**。
+     ⚠️ 27/28 那类"差不多"的估值就是上一轮留下 19px 空隙的原因；
+        这里改的是**唯一一行数字**，所以注释必须把量法留下。
+     ⚠️ 换 OnlyOffice 大版本时这条可能失效（状态栏高度是它的内部实现），
+        复核方式：重跑 probe-oo-rowscan.mjs，看 875 那一行还对不对。
+
+     ⚠️ 这条对**所有**单文件预览生效（用户上一轮要求"包括OO"就是
+        "所有单文件分享界面一视同仁"的意思）。顺带也解决了另一处同类问题：
+        原生 `<video controls>` 的播放控制条同样在底部约 40px 处，
+        16px 的边距原本也会压住它。
+   ========================================================================== */
+.sh-float {
+  /* ★ 25px = OnlyOffice 状态栏实测高度，见上方注释（空隙 0）★ */
+  position: absolute; right: 16px; bottom: 25px;
+  z-index: 20;
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 6px 6px 12px;
+  border-radius: 999px;
+  background: var(--panel);
+  backdrop-filter: blur(14px) saturate(150%);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  max-width: calc(100% - 32px);
+}
+.sh-float-name {
+  font-size: 12.5px; color: var(--text);
+  max-width: 46vw;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sh-float-dl {
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 27px; padding: 0 11px;
+  border-radius: 999px;
+  background: var(--accent); color: #fff;
+  font-size: 12.5px; text-decoration: none;
+  transition: background .12s;
+}
+.sh-float-dl:hover { background: var(--accent-hover); }
+.sh-float-dl svg { width: 14px; height: 14px; }
+
+/* ==========================================================================
+   四、空 / 错误 / 提取码 / 预览兜底
+   ========================================================================== */
+.sh-card-ico {
+  width: 46px; height: 46px;
+  display: grid; place-items: center;
+  border-radius: 50%;
+  background: var(--bg-hover);
+  color: var(--text-3);
+}
+.sh-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  height: 34px; padding: 0 16px;
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+  background: var(--bg-card); color: var(--text);
+  font-size: 13px; font-family: inherit;
+  cursor: pointer;
+  transition: background .12s, border-color .12s;
+}
+.sh-btn:hover { background: var(--bg-hover); }
+.sh-btn.primary {
+  background: var(--accent); border-color: var(--accent); color: #fff;
+}
+.sh-btn.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+
+.sh-lock-form {
+  display: flex; flex-direction: column; gap: 10px;
+  align-items: stretch; width: min(320px, 84vw);
+}
+.sh-lock-form input {
+  height: 38px; padding: 0 12px;
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+  background: var(--bg-card); color: var(--text);
+  font-size: 14px; font-family: inherit; text-align: center; letter-spacing: 2px;
+}
+.sh-lock-form input:focus { outline: 2px solid var(--accent-line); outline-offset: 1px; }
+
+.sh-empty {
+  flex: 1 1 auto;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 10px; color: var(--text-3); text-align: center;
+}
+.sh-empty svg { width: 44px; height: 44px; opacity: .6; }
+.sh-empty .t { font-size: 14px; color: var(--text-2); }
+.sh-empty .h { font-size: 12.5px; color: var(--text-3); }
+
+/* ---- toast ---- */
 .sh-toast {
-  position: fixed; left: 50%; bottom: 76px; transform: translateX(-50%);
-  background: rgba(28,28,28,.94); color: #fff;
-  padding: 10px 16px; border-radius: 6px; font-size: 13px;
-  z-index: 60; max-width: 82vw; box-shadow: var(--shadow);
+  position: fixed; left: 50%; bottom: 28px;
+  transform: translateX(-50%);
+  z-index: 60;
+  max-width: min(560px, 90vw);
+  padding: 9px 16px;
+  border-radius: 999px;
+  background: rgba(16, 24, 40, .92);
+  color: #fff;
+  font-size: 12.5px;
+  box-shadow: var(--shadow);
+}
+
+/* ---- 类型色（.sh-ico.k-*）---- */
+.sh-ico { display: block; }
+.sh-ico.k-dir     { color: var(--c-dir); }
+.sh-ico.k-image   { color: var(--c-image); }
+.sh-ico.k-video   { color: var(--c-video); }
+.sh-ico.k-audio   { color: var(--c-audio); }
+.sh-ico.k-text    { color: var(--c-text); }
+.sh-ico.k-doc     { color: var(--c-doc); }
+.sh-ico.k-pdf     { color: var(--c-pdf); }
+.sh-ico.k-cad     { color: var(--c-cad); }
+.sh-ico.k-archive { color: var(--c-archive); }
+.sh-ico.k-file    { color: var(--c-file); }
+
+/* 大图标（空态 / 卡片）沿用同一套 type 色 */
+.sh-card-ico .sh-ico.k-dir     { color: var(--c-dir); }
+.sh-card-ico .sh-ico.k-file    { color: var(--c-file); }
+
+/* 小屏：面板铺满一点，但仍不许盖满整页 */
+@media (max-width: 560px) {
+  :root { --sh-tree-w: min(300px, 86vw); }
+  .sh-float-name { max-width: 52vw; }
 }

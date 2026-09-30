@@ -18,7 +18,7 @@
 #   因此本容器必须和 OnlyOffice 在**同一个 docker 网络**上。
 #
 # 构建（项目根目录）：
-#   docker build --network=host -f nebula/Dockerfile -t nebula:1.2.5 .
+#   docker build --network=host -f nebula/Dockerfile -t nebula:1.2.6 .
 #
 # ⚠️ 构建上下文必须是仓库根目录（不是 nebula/），因为基础镜像 kkfileview:5.0.2
 #    需要在本地存在；若用 nebula/ 作上下文，COPY 路径也得跟着改。
@@ -238,7 +238,7 @@ EXPOSE 8012 8088
 #   放在末尾 ⇒ 只多一个空的元数据层，构建 1 秒内完成。
 #   ⚠️ 以后加新指令请加在 **它上面**，别往它后面追加 RUN/COPY。
 # -----------------------------------------------------------------------------
-ARG NEBULA_VERSION=1.2.5
+ARG NEBULA_VERSION=1.2.6
 
 LABEL org.opencontainers.image.title="NebulaDisk" \
       org.opencontainers.image.description="仿 Windows 云盘 + kkFileView 预览（单镜像双进程）" \
