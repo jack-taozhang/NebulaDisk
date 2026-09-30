@@ -32,3 +32,12 @@ __pycache__/
 *.pyc
 *.pyo
 kkfileview.zip
+
+# ★ GitHub 令牌（tools/gh-push-api.mjs 的凭据，一行纯 token）★
+#   2026-09-30 加：本机 `git push` 两条路都堵 ——
+#     · GCM 在非桌面 shell 会卡住（exit 124 挂死）；
+#     · github.com 的 HTTPS 时通时断（TCP 443 能连，TLS 握手才挂）。
+#   而 api.github.com 一直稳 ⇒ 改走 Git Data API 整树推送（tools/）。
+#   令牌只放这个文件，绝不入库。
+.gh-token
+node_modules/
