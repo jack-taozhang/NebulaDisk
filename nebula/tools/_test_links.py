@@ -20,12 +20,14 @@
 
 from __future__ import annotations
 
+import builtins
 import os
 import sqlite3
 import sys
 import tempfile
 import time
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -476,6 +478,60 @@ def main() -> int:
            f"expiresAt={r.json().get('expiresAt')}")
         with TestClient(app) as guest:
             ok(guest.get(f"/f/{xtok}").status_code == 200, "续期后 /f 又能用了")
+
+        print("\n[15] ★★ 文件「读不出内容」⇒ 必须明确报错，不能发 200 + 0 字节 ★★")
+        # 背景（用户报障原话）：「目前本机OO 打开文件有问题。排查一下」
+        #   真因是 Windows 上的**云端占位文件**（OneDrive / Nextcloud 按需同步）：
+        #     stat 报出真实大小，read 却只拿到 0 字节（WSL 的 drvfs/9p 挂载上尤其明显）。
+        #   不设防的后果实测：FileResponse 先发 Content-Length，再发 0 字节 ⇒
+        #     OnlyOffice 转圈约 20 秒后「下载文件失败」，服务端只留一条 ASGI 层的
+        #     `RuntimeError: Response content shorter than Content-Length`。
+        #   所以 webutil.probe_readable() 先探 1 字节，读不到就 503 + 人话。
+        (_DIR / "ghost.bin").write_bytes(b"x" * 2048)
+        r = cli.post("/api/shortlink", data={"mount": "共享", "path": "/ghost.bin"})
+        gtok = r.json()["token"]
+        with TestClient(app) as guest:
+            _g = guest.get(f"/f/{gtok}")
+            ok(_g.status_code == 200 and _g.content == b"x" * 2048,
+               "能读的文件照旧 200 + 正确字节", f"HTTP {_g.status_code}")
+
+        _real_open = builtins.open
+
+        def _zeros_open(file, *a, **kw):
+            """只对 ghost.bin 生效：模拟「open 成功、read 出来 0 字节」的占位文件。"""
+            if str(file).endswith("ghost.bin"):
+                import io
+                return io.BytesIO(b"")
+            return _real_open(file, *a, **kw)
+
+        with mock.patch("builtins.open", _zeros_open):
+            with TestClient(app) as guest:
+                _r = guest.get(f"/f/{gtok}")
+                ok(_r.status_code == 503,
+                   "★ 读到 0 字节 → 503（而不是 200 + 0 字节）★",
+                   f"HTTP {_r.status_code} {_r.text[:100]}")
+                ok("不可读" in _r.text and "云" in _r.text,
+                   "提示里说清是「内容不可读」并给了可能原因", _r.text[:160])
+
+        def _eio_open(file, *a, **kw):
+            """模拟 EIO（脱机 / 云盘客户端没跑时的典型报错）。"""
+            if str(file).endswith("ghost.bin"):
+                raise OSError(5, "Input/output error")
+            return _real_open(file, *a, **kw)
+
+        with mock.patch("builtins.open", _eio_open):
+            with TestClient(app) as guest:
+                _r = guest.get(f"/f/{gtok}")
+                ok(_r.status_code == 503, "★ OSError(EIO) 也是 503 ★",
+                   f"HTTP {_r.status_code}")
+
+        # ★ 两个关键副作用，都必须守住 ★
+        _items = {i["token"]: i for i in cli.get("/api/links").json()["items"]}
+        ok(gtok in _items,
+           "★ 503 **不是** 404 ⇒ 链接没被惰性自清误删（读不出来 ≠ 文件没了）★")
+        ok(_items.get(gtok, {}).get("hits") == 1,
+           "★ 探测在 touch() 之前 ⇒ 失败的那几次没白烧访问次数 ★",
+           f"hits={_items.get(gtok, {}).get('hits')}")
 
     print(f"\n结果：{pass_n} 通过 / {fail_n} 失败\n")
     return 1 if fail_n else 0

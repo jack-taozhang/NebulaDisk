@@ -2043,6 +2043,21 @@ button { font-family: inherit; font-size: inherit; color: inherit; }
 }
 .lm-bulk-n { margin-right: auto; }
 
+/* ★ 未选中时批量条**仍在**（用户要求常显），但不再抢注意力 ★
+   换成中性底色 + 普通边框；里面的按钮/下拉靠 [disabled] 自己变灰。
+   空着也占位，是为了让勾选时列表高度**不跳** —— 连点两行时不会点空。 */
+.lm-bulk.is-empty {
+  background: var(--bg-hover);
+  border-color: var(--border);
+  color: var(--text-2);
+}
+.lm-bulk .btn[disabled],
+.lm-bulk .lm-bulk-sel[disabled] {
+  opacity: .45;
+  cursor: not-allowed;
+}
+.lm-bulk .btn[disabled]:hover { filter: none; }
+
 /* ---- 列表 ---- */
 .lm-list {
   display: flex; flex-direction: column; gap: 6px;

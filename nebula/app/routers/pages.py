@@ -8,7 +8,7 @@ from fastapi import APIRouter, Form, Query, Request
 from fastapi.responses import HTMLResponse
 from .. import shares, shortlink
 from ..config import DANGEROUS_EXT, ext_of, settings
-from ..webutil import WEB_DIR, _mount, _origin, _stream_file
+from ..webutil import WEB_DIR, _mount, _origin, _stream_file, probe_readable
 from ..share_web import _share_unlocked, _render_share_page
 
 
@@ -686,6 +686,11 @@ async def short_open(token: str, request: Request, dl: str = ""):
     #   否则 /f/<token> 就等同于"免登录 + 长期有效 + 可直接执行/落盘"的通道。
     if ext_of(p.name) in DANGEROUS_EXT:
         want_dl = True
+
+    # ★ 先探「内容读不读得出来」，**再**计数 ★
+    #   顺序反了的话：一个读不出内容的文件会白烧 max_visits 配额，
+    #   访问次数也会虚高 —— 用户根本没看到内容。
+    probe_readable(p)
 
     shortlink.touch(token)
 

@@ -12,6 +12,9 @@ src/
 # 构建产物
 **/target/
 
+# 离线发布包（deploy/export-bundle.sh 的产物，可随时整体重生成）
+dist/
+
 # 编辑器与系统文件
 .idea/
 .vscode/

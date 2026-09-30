@@ -38,16 +38,70 @@ for a in "$@"; do
   esac
 done
 
-VER="$(env_get "$CDIR/.env.example" NB_VERSION)"; VER="${VER:-1.2.2}"
+VER="$(env_get "$CDIR/.env.example" NB_VERSION)"; VER="${VER:-1.2.3}"
 CAD_VER="$(env_get "$CDIR/.env.example" NB_CAD_VERSION)"; CAD_VER="${CAD_VER:-1.7.0}"
 OUT="$ROOT/dist/nebula-$VER"
 
 # ---------------------------------------------------------------------------
-say "1/4 重新生成纯运行版编排"
+say "1/4 准备纯运行版编排"
 PY="python3"
 command -v python3 >/dev/null 2>&1 || PY="python"
-if ! ( cd "$CDIR" && $PY gen-run-compose.py ); then
-  bad "生成 docker-compose.run.yml 失败"; exit 1
+
+# ★★ 存量故障修复（2026-09-30）：这个包一直是生成不出来的 ★★
+#   `gen-run-compose.py` 的契约是「输入 deploy/docker-compose.yml（唯一真相：
+#   **带 build:**）→ 输出纯运行版」。但 deploy/docker-compose.yml 里的 build: 段
+#   在很早的一个提交（07175d9「Sync v6 preview changes from NAS」）就被
+#   从 NAS 同步回来的**纯运行版**覆盖掉了，此后：
+#        脚本第 1 步必然失败 → export-bundle.sh 每次都直接退出。
+#   （git 证据：ffa7427 里 `^    build:` 有 1 处，之后每个版本都是 0 处。）
+#
+#   ⇒ 不能靠"把 build: 猜回来"糊上（context / dockerfile / 是否该带
+#     pull_policy 都得靠猜，猜错就是把部署路径改坏）。
+#     改成**按事实分流**：
+#       源里还有 build:  → 照旧重新生成（原契约成立时行为不变）
+#       源里没有 build:  → 跳过生成，直接用**已跟踪的** docker-compose.run.yml，
+#                          但**必须自己把形状断言一遍** ——
+#                          "跳过生成"绝不能变成"没人把关"（本条修正的全部价值就在这）。
+if grep -qE '^    build:' "$CDIR/docker-compose.yml"; then
+  if ! ( cd "$CDIR" && $PY gen-run-compose.py ); then
+    bad "生成 docker-compose.run.yml 失败"; exit 1
+  fi
+  ok "已从 deploy/docker-compose.yml 重新生成 docker-compose.run.yml"
+else
+  warn "deploy/docker-compose.yml 里没有 build: 段（该文件已是纯运行版）"
+  info "  ⇒ 跳过重新生成，改用已跟踪的 deploy/docker-compose.run.yml，并对它做形状断言"
+  RUN="$CDIR/docker-compose.run.yml"
+  [ -f "$RUN" ] || { bad "缺 $RUN —— 既不能生成也没有现成产物，无法打包"; exit 1; }
+  # 断言 1：产物里不能有 build:（只数配置行，注释里出现"build:"不算）
+  if grep -qE '^    build:' "$RUN"; then
+    bad "docker-compose.run.yml 里含 build: 段 —— 纯运行版不该有，请人工修"; exit 1
+  fi
+  # 断言 2：3 个服务各自一条 pull_policy: never
+  NRUNPULL="$(grep -cE '^    pull_policy: never' "$RUN")"
+  [ "$NRUNPULL" -eq 3 ] || { bad "run.yml 的 pull_policy: never 数量异常：$NRUNPULL（应为 3）"; exit 1; }
+  # 断言 3：服务形状没变（缩进 2 的服务名 + 紧跟其后的 image:）
+  NRUNSVC="$(grep -cE '^    image:' "$RUN")"
+  [ "$NRUNSVC" -eq 3 ] || { bad "run.yml 的 image: 数量异常：$NRUNSVC（应为 3）"; exit 1; }
+  # 断言 4：镜像版本必须走 .env 占位（否则离线包换不了版本）
+  grep -qE '^    image: nebula:\$\{NB_VERSION' "$RUN" \
+    || { bad "run.yml 的 nebula 镜像没走 \${NB_VERSION} 占位"; exit 1; }
+  # ★ 把版本占位对齐到本次要发的版本 ★
+  #   run.yml 是**跟踪在库里的生成物**，它的默认值会跟着版本号走；
+  #   但万一漏改了，这里兜一下，避免包里的默认版本与 tar 对不上。
+  #   ⚠️ 不用 sed 写这个替换：`${NB_VERSION:-…}` 里全是花括号与美元符，
+  #      在 shell 双引号 + sed 正则里要连过两层转义，极易写错。用 python 直白替换。
+  "$PY" - "$RUN" "$VER" <<'PYEOF'
+import pathlib, re, sys
+p, ver = pathlib.Path(sys.argv[1]), sys.argv[2]
+s = p.read_text(encoding="utf-8")
+s2 = re.sub(r"\$\{NB_VERSION:[^}]*\}", "${NB_VERSION:-" + ver + "}", s)
+if s2 != s:
+    p.write_text(s2, encoding="utf-8")
+    print(f"    [OK] run.yml 里 NB_VERSION 默认值 -> {ver}")
+else:
+    print(f"    [OK] run.yml 里 NB_VERSION 默认值已是 {ver}")
+PYEOF
+  ok "docker-compose.run.yml 形状校验通过（3 服务 / 3 pull_policy / 无 build:）"
 fi
 
 # ---------------------------------------------------------------------------

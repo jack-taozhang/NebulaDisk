@@ -447,27 +447,44 @@ const LinkManager = (() => {
       renderBulk();
     }
 
-    /** 批量条：把"能对一批链接做的事"一次给全 */
+    /** 批量条：把"能对一批链接做的事"一次给全
+     *
+     * ★ 常显（2026-09-30，用户要求：「批量操作的 菜单条 一直显示即可」）★
+     *   原来只有「已选 ≥ 1」时才出现，两个实际后果：
+     *     ① 用户看不见这里能做什么 —— 批量处理这个能力**等于不存在**；
+     *     ② 每勾一行，整块列表就被撑下去一行，鼠标目标跟着跳，
+     *        连点两行的第二下极容易点空（列表本身还能滚动）。
+     *   所以改成恒定占位：未选时按钮**置灰 + 一行提示**，选了再点亮。
+     *   ⚠️ 置灰用 `disabled` 属性（而不是只加 class）——
+     *      这样事件层也一起挡住，不必在每个 handler 里再判一次 k === 0。
+     */
     function renderBulk() {
       const k = state.sel.size;
-      if (!k) { bulkBox.hidden = true; bulkBox.innerHTML = ''; return; }
-      bulkBox.hidden = false;
+      const vis = visibleItems().length;
+      const dis = k ? '' : ' disabled';
       const hasShare = state.items.some((s) => state.sel.has(s.token) && s.kind === 'share');
+
+      bulkBox.hidden = false;                       // ★ 常显 ★
+      bulkBox.classList.toggle('is-empty', k === 0);
       bulkBox.innerHTML = `
-        <span class="lm-bulk-n">已选 <b>${k}</b> 条</span>
-        <button class="btn small" data-b="copy">复制地址</button>
-        <button class="btn small" data-b="csv">导出所选</button>
-        <select data-b="renew" class="lm-bulk-sel" title="批量修改有效性（只对分享有效）">
+        <span class="lm-bulk-n">${k ? `已选 <b>${k}</b> 条` : '未选择'}</span>
+        <button class="btn small" data-b="copy"${dis}>复制地址</button>
+        <button class="btn small" data-b="csv"${dis}>导出所选</button>
+        <select data-b="renew" class="lm-bulk-sel"${dis}
+                title="批量修改有效期 / 次数（两类链接都支持续期）">
           <option value="">批量操作…</option>
           <option value="7">延长 7 天</option>
           <option value="30">延长 30 天</option>
           <option value="0">改为永久有效</option>
           <option value="novisit">解除次数限制</option>
         </select>
-        ${hasShare ? '' : '<span class="lm-bulk-warn">（"解除次数限制"只对分享生效）</span>'}
-        <button class="btn small ghost" data-b="invert">反选</button>
-        <button class="btn small ghost" data-b="none">取消选择</button>
-        <button class="btn small danger" data-b="kill">批量撤销</button>`;
+        ${!k
+          ? '<span class="lm-bulk-warn">勾选行首方框即可批量处理</span>'
+          : (hasShare ? ''
+            : '<span class="lm-bulk-warn">（"解除次数限制"只对分享生效）</span>')}
+        <button class="btn small ghost" data-b="invert"${vis ? '' : ' disabled'}>反选</button>
+        <button class="btn small ghost" data-b="none"${dis}>取消选择</button>
+        <button class="btn small danger" data-b="kill"${dis}>批量撤销</button>`;
     }
 
     /* ---- 列表 ---- */

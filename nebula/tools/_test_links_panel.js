@@ -291,12 +291,23 @@ async function confirmYes() {
 
   console.log('\n§4 勾选与批量条');
   {
-    ok('未选中时批量条是隐藏的', $('[data-role="bulk"]').hidden === true,
+    // ★ 用户要求：「批量操作的 菜单条 一直显示即可」★
+    ok('★ 未选中时批量条**仍然显示**（常显）★',
+      $('[data-role="bulk"]').hidden === false,
       'hidden=' + $('[data-role="bulk"]').hidden);
+    ok('未选中时是置灰态（.is-empty）', $('[data-role="bulk"]').classList.contains('is-empty'));
+    ok('未选中时操作按钮禁用', $('[data-b="copy"]').disabled === true
+      && $('[data-b="kill"]').disabled === true
+      && $('[data-b="renew"]').disabled === true);
+    ok('未选中时给出引导文案', /勾选/.test($('.lm-bulk-warn').textContent),
+      $('.lm-bulk-warn').textContent);
+
     const cb = rows()[0].querySelector('[data-role="sel"]');
     cb.click();
     await tick();
-    ok('勾选后批量条出现', $('[data-role="bulk"]').hidden === false);
+    ok('勾选后批量条点亮', $('[data-role="bulk"]').hidden === false
+      && !$('[data-role="bulk"]').classList.contains('is-empty'));
+    ok('勾选后按钮可用', $('[data-b="copy"]').disabled === false);
     ok('批量条显示「已选 1 条」', /1/.test($('.lm-bulk-n').textContent));
     // 点行的文字区也能选中
     rows()[1].querySelector('.lm-title').click();
@@ -305,7 +316,10 @@ async function confirmYes() {
     ok('批量复制按钮存在', !!$('[data-b="copy"]') && !!$('[data-b="kill"]'));
     $('[data-b="none"]').click();
     await tick();
-    ok('取消选择后批量条隐藏', $('[data-role="bulk"]').hidden === true);
+    ok('取消选择后批量条**不消失**，只是又置灰',
+      $('[data-role="bulk"]').hidden === false
+      && $('[data-role="bulk"]').classList.contains('is-empty'));
+    ok('取消选择后按钮重新禁用', $('[data-b="copy"]').disabled === true);
   }
 
   console.log('\n§5 行内动作：复制 / 打开 / 二维码');
@@ -534,7 +548,9 @@ async function confirmYes() {
     // 取消选择
     $('[data-b="none"]').click();
     await tick();
-    ok('取消选择后批量条隐藏', $('[data-role="bulk"]').hidden === true);
+    ok('取消选择后批量条不消失（常显），仅置灰',
+      $('[data-role="bulk"]').hidden === false
+      && $('[data-role="bulk"]').classList.contains('is-empty'));
     ok('全清后主控也复位', master.checked === false && master.indeterminate === false);
 
     // 导出所选
