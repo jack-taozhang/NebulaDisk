@@ -38,7 +38,7 @@ for a in "$@"; do
   esac
 done
 
-VER="$(env_get "$CDIR/.env.example" NB_VERSION)"; VER="${VER:-1.2.4}"
+VER="$(env_get "$CDIR/.env.example" NB_VERSION)"; VER="${VER:-1.2.5}"
 CAD_VER="$(env_get "$CDIR/.env.example" NB_CAD_VERSION)"; CAD_VER="${CAD_VER:-1.7.0}"
 OUT="$ROOT/dist/nebula-$VER"
 

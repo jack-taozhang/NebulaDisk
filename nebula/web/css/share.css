@@ -64,7 +64,8 @@
    ⇒ 用 `!important` 把 `[hidden]` 钉死。这一条同时对**将来**新增的
      `display:` 规则免疫 —— 只要元素带了 hidden 就一定不显示。
    ⚠️ 不要把这条只写在 `.sh-viewer` 上：那是"修一个漏一个"，
-      凡是走 hidden 切换的元素（#sh-up / #sh-dl / #sh-toast …）都要受它保护。 */
+      凡是走 hidden 切换的元素（#sh-nav / #sh-up / #sh-zip / #sh-toast …）
+      都要受它保护。 */
 [hidden] { display: none !important; }
 
 html, body {
@@ -78,18 +79,44 @@ html, body {
 
 #share-app { min-height: 100vh; display: flex; flex-direction: column; }
 
-/* ---- 顶栏 ---- */
+/* ---- 顶栏 + 导航条（一起 sticky）---- */
+/*   ★ 为什么把 sticky 挪到外层容器 ★
+     导航条要贴在顶栏**下面**。若各自 sticky，就得给导航条写一个
+     `top: <顶栏高度>` 的魔法数字 —— 字号/内边距一改就错位。
+     套一个 sticky 容器，浏览器自己算，永远不会错。 */
+.sh-top { position: sticky; top: 0; z-index: 5; }
+
 .sh-head {
   display: flex; align-items: center; gap: 12px;
   padding: 12px 18px;
   background: var(--bg-card);
   border-bottom: 1px solid var(--border);
-  position: sticky; top: 0; z-index: 5;
 }
 .sh-brand { display: flex; align-items: center; gap: 8px; font-weight: 600; color: var(--accent); }
 .sh-brand svg { fill: var(--accent); }
 .sh-meta { margin-left: auto; color: var(--text-3); font-size: 12.5px; text-align: right; }
 .sh-meta b { color: var(--text-2); font-weight: 600; }
+
+/* ---- 导航条（面包屑 + 上一级 + 打包下载）----
+   仅**目录分享**出现；单文件分享的卡片自带「预览 / 下载」，不必再来一条。 */
+.sh-nav {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 18px;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+}
+.sh-nav .btn {
+  height: 34px; padding: 0 12px; font-size: 13px;
+  display: inline-flex; align-items: center; gap: 5px;
+  flex: 0 0 auto;
+}
+.sh-nav .sh-zip { margin-left: auto; }    /* 与面包屑拉开，靠右 */
+.sh-nav .btn svg { flex: 0 0 auto; }
+#sh-path {
+  color: var(--text-2); font-size: 13px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+  flex: 1 1 auto;
+}
 
 /* ---- 主体 ---- */
 .sh-main { flex: 1; padding: 20px; max-width: 1180px; width: 100%; margin: 0 auto; }
@@ -150,16 +177,25 @@ html, body {
 }
 .sh-row {
   display: grid;
-  grid-template-columns: 1fr 110px 150px;
+  /* 第一列是勾选框（勾几项 → 打包下载）。见下方 .sh-check */
+  grid-template-columns: 26px 1fr 110px 150px;
   gap: 10px;
   align-items: center;
-  padding: 11px 16px;
+  padding: 11px 16px 11px 12px;
   border-bottom: 1px solid var(--border);
   cursor: default;
 }
 .sh-row:last-child { border-bottom: 0; }
 .sh-row:hover { background: var(--bg-hover); }
 .sh-row.is-selected { background: var(--bg-selected); }
+
+/* 勾选框：点它 = 加/减选择集（不触发行点击的"单选"语义）。
+   accent-color 让原生复选框直接用主题色，省掉自绘的几十行。 */
+.sh-check { display: flex; align-items: center; justify-content: center; padding: 3px 0; }
+.sh-cb {
+  width: 17px; height: 17px; margin: 0; flex: 0 0 auto;
+  cursor: pointer; accent-color: var(--accent);
+}
 .sh-name {
   display: flex; align-items: center; gap: 9px;
   min-width: 0;
@@ -172,23 +208,21 @@ html, body {
 
 /* 移动端：隐藏大小/时间，只留文件名（避免横向挤压） */
 @media (max-width: 620px) {
-  .sh-row { grid-template-columns: 1fr; }
+  .sh-row { grid-template-columns: 26px 1fr; }
   .sh-size, .sh-time { display: none; }
   .sh-main { padding: 12px; }
+  .sh-nav { padding: 8px 12px; gap: 8px; }
+  /* 窄屏不藏按钮文字（图标认不出来），改为压缩内边距；
+     面包屑自己有 ellipsis + min-width:0，会先让位。 */
+  .sh-nav .btn { padding: 0 10px; }
 }
 
-/* ---- 底栏（面包屑 + 操作）---- */
-.sh-foot {
-  display: flex; align-items: center; gap: 12px;
-  padding: 12px 18px;
-  background: var(--bg-card); border-top: 1px solid var(--border);
-  position: sticky; bottom: 0;
-}
-#sh-path {
-  color: var(--text-2); font-size: 12.5px; overflow: hidden;
-  text-overflow: ellipsis; white-space: nowrap; min-width: 0;
-}
-.sh-actions { margin-left: auto; display: flex; gap: 8px; flex: 0 0 auto; }
+/* ---- 底栏已移除（2026-09-30）----
+   原 `.sh-foot` 把「面包屑 + 上一级 + 下载」放在**右下角**。目录分享逐层浏览时
+   很难用（用户报障原话：「上一级目前在最右下角，操作起来很不方便」），
+   现已整体上移到顶部的 .sh-nav。
+   ⚠️ 别再把导航类控件放回底部 —— 列表在左上方，操作在右下角，
+      中间隔着整屏的鼠标移动距离。 */
 
 /* ---- 预览浮层 ---- */
 .sh-viewer {
@@ -209,6 +243,25 @@ html, body {
 .sh-viewer-body iframe { width: 100%; height: 100%; border: 0; display: block; }
 .sh-viewer-body img {
   max-width: 100%; max-height: 100%; display: block; margin: auto; object-fit: contain;
+}
+
+/* ---- 原生媒体 / 文本（与网盘「浏览器原生预览」同一条腿）----
+   ★ 视频与音频用深色舞台 ★
+     浮层主体是白底，视频黑边会显得像"没加载出来"；音频则只占一小条。
+     深色底 + 居中，与网盘 viewer.js 的 .media-stage 观感一致。 */
+.sh-media-wrap {
+  width: 100%; height: 100%;
+  display: flex; align-items: center; justify-content: center;
+  background: #0f0f0f;
+}
+.sh-media-wrap .spinner { border-color: rgba(255,255,255,.25); border-top-color: #fff; }
+.sh-viewer-body .sh-media { max-width: 100%; max-height: 100%; display: block; }
+.sh-viewer-body audio.sh-media { width: min(520px, 88%); height: 54px; }
+.sh-text {
+  margin: 0; width: 100%; height: 100%; overflow: auto; box-sizing: border-box;
+  padding: 14px 16px; background: #fff; color: #222;
+  font: 12.5px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, "Courier New", monospace;
+  white-space: pre-wrap; word-break: break-word;
 }
 
 /* ---- Toast ---- */

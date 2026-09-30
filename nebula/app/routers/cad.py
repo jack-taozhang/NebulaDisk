@@ -8,7 +8,7 @@ import httpx
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
-from .. import auth, files
+from .. import auth, files, integrations
 from ..config import settings
 from ..webutil import _origin, _internal_origin, _mount, make_raw_url
 
@@ -151,8 +151,14 @@ async def api_cad_preview(
     q = urlencode({"open": public_raw, "name": p.name})
     # 深链走**同源反代**前缀 /cad，避免暴露 cad-viewer 的独立端口、
     # 也顺带绕开跨域与混合内容问题。
-    url = f"/cad/?{q}"
-    return {"ok": True, "url": url, "raw": public_raw}
+    inner = f"/cad/?{q}"
+    # ★ 再包一层 /lite 外壳 ⇒「页面嵌入块」形态（2026-09-30 用户要求）★
+    #   直接给 /cad/ 会看到**一整台 CAD 程序**：顶部功能区（文件/视图/插入…）、
+    #   右侧垂直工具条、底部命令行 + 状态栏全在。预览只需要图纸本身，
+    #   由 /lite 外壳的 _LITE_HIDE 用 CSS 把那些块收掉。
+    #   详见 integrations.lite_shell_url 的注释。
+    url = integrations.lite_shell_url("cad", inner, p.name)
+    return {"ok": True, "url": url, "inner": inner, "raw": public_raw}
 
 
 @router.api_route("/cad/{rest:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"])

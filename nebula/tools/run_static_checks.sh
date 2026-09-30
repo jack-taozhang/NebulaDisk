@@ -22,15 +22,20 @@
 #     ★ 关键是 **Git Bash 容忍 CRLF、Linux 不容忍** ★
 #     ⇒ 本地怎么测都是绿的，一推到 NAS 才炸。必须显式检查。
 #
-# 四步：
+# 五步：
 #   1) nebula/app/ 名字解析（期望 0 处）
 #   2) 换行符（nebula/ + deploy/ + 根级脚本，期望 0 个 CRLF；src/ 是上游，不扫）
 #   3) ★ 两套护栏的自检 ★ —— 拿夹具跑一遍，必须**恰好**报出预期数量。
 #      护栏自己没被验证过 = 没有护栏。
-#   4) ★ hidden 属性闸门 ★ —— 用了 `hidden` 的页面，其样式表必须钉死
+#   4) ★ hidden 属性闸门 ★（含自检）
 #      `[hidden] { display: none !important }`。理由见 check_hidden_css.py 的 docstring
 #      （2026-09-30：`.sh-viewer{display:flex}` 盖掉 UA 的 hidden，
 #        分享落地页被空白浮层糊住，而接口/DOM 全是好的）。
+#
+#   5) ★ 预览路由三方一致 ★ —— config.route_of() / viewer.js / share.js 的
+#      引擎优先级与扩展名表必须相同，分享预览接口的词表也必须齐。
+#      理由见 check_preview_route_parity.py 的 docstring
+#      （2026-09-30：用户在分享页看到 DWG 被 kkFileView 打开，网盘却是 cad-viewer）。
 # =============================================================================
 set -uo pipefail
 
@@ -42,6 +47,7 @@ EOLFIX="$HERE/_eol_fixtures"
 CHECK="$HERE/check_undefined.py"
 EOL="$HERE/check_eol.py"
 HID="$HERE/check_hidden_css.py"
+PARITY="$HERE/check_preview_route_parity.py"
 
 # ★★ MSYS 路径必须转给原生 Windows 程序 ★★
 #   `/d/Docker/...` 会被 Windows Python 解析成 `D:\d\Docker\...`（盘符 + 字面 d）
@@ -70,7 +76,7 @@ FAIL=0
 
 # ---------------------------------------------------------------------------
 echo
-echo "════════ 1/4 后端名字解析（nebula/app/）════════"
+echo "════════ 1/5 后端名字解析（nebula/app/）════════"
 if "$PY" "$(winpath "$CHECK")" "$(winpath "$APP")"; then
   echo "  ✅ 通过"
 else
@@ -80,7 +86,7 @@ fi
 
 # ---------------------------------------------------------------------------
 echo
-echo "════════ 2/4 换行符（nebula/ deploy/ 根级脚本；src/ 是上游不扫）════════"
+echo "════════ 2/5 换行符（nebula/ deploy/ 根级脚本；src/ 是上游不扫）════════"
 # ★ 必须在 $ROOT 下用「相对路径 + .」调用 ★
 #   check_eol.py 对「当前目录」这个扫描根只挑根级文件名白名单（build.sh、
 #   Dockerfile、.dockerignore…）；传绝对路径会被当成普通目录整棵递归，
@@ -99,7 +105,7 @@ fi
 
 # ---------------------------------------------------------------------------
 echo
-echo "════════ 3/4 护栏自检 ════════"
+echo "════════ 3/5 护栏自检 ════════"
 
 echo "  ── 3a 名字解析护栏（_undef_fixtures/）──"
 FIXOUT="$("$PY" "$(winpath "$CHECK")" "$(winpath "$FIX")" 2>&1)"
@@ -157,7 +163,7 @@ fi
 
 # ---------------------------------------------------------------------------
 echo
-echo "════════ 4/4 hidden 属性闸门（含自检）════════"
+echo "════════ 4/5 hidden 属性闸门（含自检）════════"
 # ★ 2026-09-30 事故：`[hidden]{display:none}` 只在 UA 样式表里，
 #   作者样式任何一个 `display:` 都能把它盖掉（作者 > UA，不看特异性）⇒
 #   分享落地页的 `.sh-viewer{display:flex}` 让"默认隐藏的预览浮层"永远显示，
@@ -179,6 +185,32 @@ if [ "$HIDRC" = "0" ]; then
 else
   echo "    ❌ 有页面用了 hidden 属性、但它的样式表没钉死 [hidden]"
   echo "       修法：在该 CSS 顶部加 `[hidden] { display: none !important; }`"
+  FAIL=1
+fi
+
+# ---------------------------------------------------------------------------
+echo
+echo "════════ 5/5 预览路由三方一致（含自检）════════"
+# ★ 2026-09-30 用户报障：「/s/页面上的预览路由和网盘的路由不一致」★
+#   同一个 DWG：网盘里由 cad-viewer 渲染，分享页却被 kkFileView 打开。
+#   三处判定（后端 route_of / viewer.js / share.js）各写各的 ⇒ 必然漂移，
+#   而漂移**不报错**，只让两个页面表现不同。所以由静态层守死。
+echo "  ── 5a 闸门自检（临时夹具）──"
+PARITYSELF="$("$PY" "$(winpath "$PARITY")" --selftest 2>&1)"
+printf '%s\n' "$PARITYSELF" | sed 's/^/  /'
+if printf '%s\n' "$PARITYSELF" | grep -q '✅ 自检通过'; then :; else
+  echo "    ❌ 闸门自检未通过 —— 未自检的护栏等于没有护栏"
+  FAIL=1
+fi
+echo "  ── 5b 扫仓库 ──"
+PARITYOUT="$("$PY" "$(winpath "$PARITY")" 2>&1)"
+PARITYRC=$?
+printf '%s\n' "$PARITYOUT" | sed 's/^/  /'
+if [ "$PARITYRC" = "0" ]; then
+  echo "    ✅ 通过"
+else
+  echo "    ❌ 预览路由不一致（改 share.js 时忘了同步 viewer.js？）"
+  echo "       三处必须同序：cad → onlyoffice → 原生 → kkfileview → download"
   FAIL=1
 fi
 

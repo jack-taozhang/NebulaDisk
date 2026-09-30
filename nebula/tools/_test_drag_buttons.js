@@ -542,8 +542,23 @@ console.log('\n════════ _test_drag_buttons ═══════
   /* --- 12.1 explorer 必须复用工厂，不再手写业务按钮 --- */
   check('§12 explorer 工具栏由 WM.Toolbar.build 产出',
     /WM\.Toolbar\.build\(\s*\{/.test(exSrc));
-  check('§12 explorer 不再手写 class="tbtn"（旧的双份真相）',
-    !/class="tbtn/.test(exSrc),
+  /* ★ 2026-09-30 修正：原来写的是 `!/class="tbtn/`，**过宽** ★
+     它本意是「业务按钮必须走 WM.Toolbar.btn 工厂，不许再手写一份平行模板」。
+     但「新建」是一个**复合控件**：外层 .tbtn-dropdown 容器 + 内层
+     <button class="tbtn"> + 下拉箭头 + 文本 + 弹出的 ContextMenu。
+     WM.Toolbar.btn 只产单个按钮，表达不了这个组合 —— 所以那是**合法**手写，
+     不是"双份真相"。它一加进来，这条断言就一直假红（HEAD 上就是红的）。
+     改法：把复合下拉块本身摘掉再断言其余位置没有手写 tbtn；
+     同时**正向**要求该复合块仍在（且仍带 data-a="new-menu"），
+     免得哪天整块被删掉后这条断言因为"没东西可摘"而悄悄变绿。 */
+  const DD_RE = /class="tbtn-dropdown"[\s\S]{0,1200}?<\/div>/g;
+  const ddBlocks = exSrc.match(DD_RE) || [];
+  const exNoDD = exSrc.replace(DD_RE, ' ');
+  check('§12 复合下拉（新建菜单）仍在，且带 data-a="new-menu"',
+    ddBlocks.length === 1 && /class="tbtn-dropdown"\s+data-a="new-menu"/.test(exSrc),
+    `摘到 ${ddBlocks.length} 个 .tbtn-dropdown 块`);
+  check('§12 explorer 不再手写 class="tbtn"（复合下拉内部除外）',
+    !/class="tbtn"/.test(exNoDD),
     '手写业务按钮会与 WM.Toolbar.btn 的模板漂移');
   // 负向：业务动作不允许再挂在 data-act 上（枚举式，避免误伤地址栏 nav-btn）
   const bizActs = ['new-folder', 'upload', 'rename', 'download', 'delete',

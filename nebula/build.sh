@@ -2,7 +2,7 @@
 # =============================================================================
 # NebulaDisk 镜像构建 / 部署脚本
 #
-#   ./nebula/build.sh                    # 构建 nebula:1.2.4
+#   ./nebula/build.sh                    # 构建 nebula:1.2.5
 #   ./nebula/build.sh --up               # 构建后启动
 #   ./nebula/build.sh --no-cache         # 全量重建
 #   ./nebula/build.sh --check            # 只做构建前检查，不真构建
@@ -45,7 +45,7 @@ if ROOT_W="$(cd -- "$HERE/.." 2>/dev/null && pwd -W 2>/dev/null)"; then
 fi
 [[ -n "$ROOT" ]] || ROOT="D:/Docker/kkFileView"
 
-IMAGE="nebula:1.2.4"
+IMAGE="nebula:1.2.5"
 BASE_IMAGE="kkfileview:5.0.2"
 DO_UP=0
 NO_CACHE=0
@@ -58,7 +58,7 @@ usage() {
     cat <<'EOF'
 NebulaDisk 构建脚本
 
-  ./nebula/build.sh              构建 nebula:1.2.4
+  ./nebula/build.sh              构建 nebula:1.2.5
   ./nebula/build.sh --up         构建后启动
   ./nebula/build.sh --no-cache   全量重建
   ./nebula/build.sh --check      只做构建前检查

@@ -46,7 +46,7 @@ done
 #   见 _common.sh 的 gen_mounts_standalone()。
 COMPOSE_FILE="$CDIR/docker-compose.yml"
 BASE_FILE="$CDIR/docker-compose.base.yml"
-VER="1.2.4"
+VER="1.2.5"
 
 # ---------------------------------------------------------------------------
 say "1/6 检查环境"
@@ -65,7 +65,7 @@ NEBULA_TAR="$(ls "$CDIR"/nebula-[0-9]*.tar 2>/dev/null | head -1)"
 CAD_TAR="$(ls "$CDIR"/nebula-cad-viewer-*.tar 2>/dev/null | head -1)"
 if [ -n "$NEBULA_TAR" ]; then
   VER="$(basename "$NEBULA_TAR" | sed -E 's#^nebula-([0-9][0-9.]*)\.tar$#\1#')"
-  [ -n "$VER" ] || VER="1.2.4"
+  [ -n "$VER" ] || VER="1.2.5"
   load_image_tar "$NEBULA_TAR" "nebula:${VER}" || exit 1
 else
   warn "没找到 nebula-*.tar —— 假定镜像已在本地"
