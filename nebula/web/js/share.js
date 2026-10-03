@@ -32,6 +32,39 @@
 (() => {
   'use strict';
 
+  /* ----------------------------------------------------------------------
+     ★ 每次载入都刷新「浏览器真实 host / 协议」Cookie（2026-10-03）★
+     ----------------------------------------------------------------------
+     与 web/js/viewer.js 顶部**同一件事**，必须两边都做：
+       分享页（/s/<token>）只加载本文件，**不加载 viewer.js** ⇒
+       放在 viewer.js 里的播种在分享页不会执行。
+
+     为什么需要（两个机制都要它）：
+       1) nginx 的 `$fwd_host`（后端 `_origin()` 拼绝对地址的依据）取值优先级是
+          **Referer > Cookie > 网关写的 Host**；而本页预览用的 iframe 带
+          `referrerpolicy="no-referrer"` ⇒ 它内部的请求**没有 Referer**
+          ⇒ 只能靠这里种的 Cookie，否则会退回被网关改写的 Host（地址就错了）。
+       2) OO 编辑器的**裸相对路径**兜底（nginx 的 /locale /resources /common）
+          靠 Cookie `oo_app` 认出是哪个编辑器；没有它一律 404
+          ⇒ 编辑器报「语言没有加载」。
+     注意 Cookie **不区分端口**，而飞牛 App 的门户端口是**按会话分配**的
+     （实测 34043/42651/46023…）⇒ 必须每次载入重写，不能只写一次。
+     ---------------------------------------------------------------------- */
+  try {
+    document.cookie = `oo_host=${location.host}; path=/; SameSite=Lax`;
+    document.cookie = `oo_proto=${location.protocol.replace(':', '')}; path=/; SameSite=Lax`;
+  } catch { /* 尽力而为 */ }
+
+  /** 按扩展名判定该用哪个 OO 编辑器（与 viewer.js 的映射保持一致） */
+  function ooAppOf(name) {
+    const ext = String(name || '').split('.').pop().toLowerCase();
+    if (['docx', 'doc', 'odt', 'rtf', 'txt'].includes(ext)) return 'documenteditor';
+    if (['xlsx', 'xls', 'csv', 'ods'].includes(ext)) return 'spreadsheeteditor';
+    if (['pptx', 'ppt', 'odp'].includes(ext)) return 'presentationeditor';
+    if (ext === 'pdf') return 'pdfeditor';
+    return '';
+  }
+
   const BOOT = window.__SHARE__ || {};
   const TOKEN = BOOT.token || '';
 
@@ -113,6 +146,16 @@
   const apiBase = () => `/api/s/${encodeURIComponent(TOKEN)}`;
   const rawUrl = (sub, download) =>
     `${apiBase()}/raw?` + new URLSearchParams({ path: sub || '', download: download ? 'true' : 'false' });
+  /**
+   * 视频「能播」流（与网盘的 `/api/play` 同一套逻辑，只是鉴权走分享 token）。
+   *
+   * 为什么不在 `<video>` 里直接用 rawUrl：**H.265/HEVC 在手机 WebView 里解不了**
+   * （`error.code=4`，桌面 Chrome 反而能播）。`/play` 会探测编码 ——
+   * 不是 HEVC 就 302 回 raw（零成本、行为不变），是 HEVC 才转成 H.264。
+   * 所以**只在原生播放失败时才切过来**，别把它当默认地址。
+   */
+  const playUrl = (sub) =>
+    `${apiBase()}/play?` + new URLSearchParams({ path: sub || '' });
   const previewUrl = (sub) =>
     `${apiBase()}/preview?` + new URLSearchParams({ path: sub || '' });
 
@@ -726,6 +769,47 @@
    * 把预览装进容器（单文件分享的整页 / 目录分享点开文件后的整页，同一条腿）。
    * 这样"单文件直接打开"和"目录里点开文件"不会走出两套渲染逻辑。
    */
+  /* 媒体窗口里的浮层提示（「正在转码…」/「编码不支持」） */
+  function mediaTip(box, text) {
+    const wrap = box.querySelector('.sh-media-wrap') || box;
+    let t = wrap.querySelector('.sh-media-tip');
+    if (!t) {
+      t = document.createElement('div');
+      t.className = 'sh-media-tip';
+      wrap.appendChild(t);
+    }
+    t.textContent = text;
+  }
+
+  /**
+   * 视频播放失败自愈 —— 与网盘 `viewer.js` 的 `openMedia` 用**同一套判据**。
+   *
+   * `error.code === 4`（`MEDIA_ERR_SRC_NOT_SUPPORTED`）= 编码/容器不被支持。
+   * 实测最常见的是 **H.265 / HEVC**：桌面 Chrome 能解，而飞牛 App 的
+   * Android WebView 解不了 ⇒ 同一个文件「电脑能播、手机黑屏」。
+   * 这时切到 `/api/s/<token>/play`（后端探到 HEVC 才转码，其余 302 回原流）。
+   *
+   * ⚠️ 只重试一次，且只在 code=4 时 —— 网络中断(2)/解码出错(3)重试没意义。
+   */
+  function attachMediaHeal(box, sub, kind) {
+    const el = box.querySelector('video,audio');
+    if (!el) return;
+    let retried = false;
+    el.addEventListener('error', () => {
+      const code = (el.error && el.error.code) || 0;
+      if (kind !== 'video' || code !== 4) return;
+      if (retried) {
+        mediaTip(box, '这个视频当前设备打不开，可点「下载」用本地播放器打开。');
+        return;
+      }
+      retried = true;
+      mediaTip(box, '正在转码，请稍候…（该视频为 H.265 编码，首次播放需转换）');
+      el.src = playUrl(sub);
+      el.load();
+      el.play().catch(() => { /* 自动播放被拦就等用户点播放 */ });
+    });
+  }
+
   async function mountPreview(box, sub, e) {
     const kind = kindOf(e);
     const src = rawUrl(sub, false);       // inline 取流（预览用，不是下载）
@@ -738,12 +822,14 @@
     }
 
     // ② 视频 / 音频：浏览器原生播放器（与网盘 openMedia 同一条腿）
+    //    ★ 挂上 H.265 自愈：见下面 attachMediaHeal 的说明 ★
     if (kind === 'video' || kind === 'audio') {
       box.innerHTML = `<div class="sh-media-wrap">${
         kind === 'video'
           ? `<video class="sh-media" src="${esc(src)}" controls autoplay playsinline></video>`
           : `<audio class="sh-media" src="${esc(src)}" controls autoplay></audio>`
       }</div>`;
+      attachMediaHeal(box, sub, kind);
       return;
     }
 
@@ -767,6 +853,16 @@
       const cfg = await jget(previewUrl(sub));
       box.innerHTML = '';
       if (cfg.route === 'onlyoffice' && cfg.config) {
+        // ★ 告诉 nginx「这是哪个编辑器」（2026-10-03）★
+        //   手机 WebView 里 OO 编辑器的 iframe 会停在 about:blank，它那些
+        //   **裸相对路径**（/locale/zh.json、/resources/img/…）会被解析到根 ⇒ 404
+        //   ⇒ 编辑器报「语言没有加载」。nginx 侧靠这个 Cookie 才知道该补回
+        //   /web-apps/apps/<app>/main/ 前缀（三个编辑器的 locale 内容各不相同，
+        //   不能随便挑一个兜底）。必须在挂载编辑器**之前**写好。
+        const app = ooAppOf(sub);
+        if (app) {
+          try { document.cookie = `oo_app=${app}; path=/; SameSite=Lax`; } catch { /* 尽力而为 */ }
+        }
         // OnlyOffice：用官方 api.js 挂载（与桌面端同一套）
         const holder = document.createElement('div');
         holder.className = 'sh-fill';
@@ -780,10 +876,12 @@
         DocsAPI.DocEditor('sh-oo-holder', cfg.config);
       } else if (cfg.url) {
         // ★ cad 与 kkFileView 都是「同源反代深链」，同一条腿 ★
-        //   （cad 是 /lite?kind=cad&target=%2Fcad%2F%3Fopen%3D…  —— 外层 /lite 把
-        //      CAD 的功能区/右侧工具条/命令行/状态栏用 CSS 收掉，见 pages.py 的
-        //      _LITE_HIDE；kk 是 /preview/onlinePreview?url=…）
-        //   两个地址都由后端给，前端原样用，不自己拼。
+        //   （cad 是 /cad/?open=…&embed=1 —— **不再套 /lite 外壳**：
+        //      /cad/ 自己注入 CSS 把功能区/右侧工具条/命令行/状态栏收掉，见 cad.py
+        //      的 _inject_embed_css；套两层 iframe 会让飞牛 App 的 WebView
+        //      不执行内层脚本，CAD 会一直转圈。
+        //      kk 是 /preview/onlinePreview?url=…）
+        //   两个地址都由后端给，前端原样用，不自己拼 —— **与网盘保持一致**。
         const f = document.createElement('iframe');
         f.src = cfg.url;
         f.setAttribute('referrerpolicy', 'no-referrer');

@@ -1319,8 +1319,19 @@ button { font-family: inherit; font-size: inherit; color: inherit; }
 }
 
 .media-stage {
+  position: relative;              /* .media-tip 的定位基准 */
   flex: 1; display: grid; place-items: center;
   background: #111; overflow: auto; padding: 20px;
+}
+/* 媒体窗口里的浮层提示（「正在转码…」/「编码不支持」）。
+   media-stage 底色固定是 #111（视频窗口一贯是深色），所以这里直接给
+   深底白字，不需要跟随主题变量 —— 跟随反而会在浅色主题下看不清。 */
+.media-stage .media-tip {
+  position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%);
+  max-width: 88%; padding: 8px 14px; border-radius: 8px;
+  background: rgba(0, 0, 0, .78); color: #fff;
+  font-size: 12.5px; line-height: 1.5; text-align: center;
+  pointer-events: none; z-index: 5;
 }
 .media-stage img {
   max-width: 100%; max-height: 100%;

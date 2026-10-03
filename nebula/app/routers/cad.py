@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from urllib.parse import urlencode, urlsplit
 
 import httpx
@@ -100,10 +101,80 @@ def _inject_unpoison(content: bytes, content_type: str) -> bytes:
     return content.replace(b"</body>", _CAD_UNPOISON_JS.encode("utf-8") + b"</body>", 1)
 
 
+
+# 把 HTML 里的相对引用 `src="./x"` / `href="./x"` 改成绝对 `/cad/x`。
+# 动机：不依赖浏览器对「文档基准」的判定（第三方 WebView 里这一环最不可靠）。
+# 只改属性形态的相对引用；JS 里的字符串（如 import.meta.url 的相对解析）不受影响。
+_REL_ATTR = re.compile(rb'(?P<a>\b(?:src|href)=")\./')
+# 去掉 ` crossorigin` 属性：CAD 的入口脚本与样式都带它（CORS 模式取流），
+# 而 SPA / KKFileView 的经典引用都不带 —— 这正好是「手机能加载 KK、加载不了 CAD」
+# 的全部差异。去掉后样式退回 no-cors 取流；module 脚本本就走 cors，不受影响。
+_CROSSORIGIN_ATTR = re.compile(rb"[\s]crossorigin(?=[\s>/])")
+
+
+def _rewrite_html(content: bytes) -> bytes:
+    content = _REL_ATTR.sub(rb'\g<a>/cad/', content)
+    return _CROSSORIGIN_ATTR.sub(b"", content)
+
+
+# ============================================================================
+# ★ 「嵌入预览」形态：把「收 UI」的 CSS 直接注入 /cad/ 文档 ★
+# ----------------------------------------------------------------------------
+# 原来是靠 pages.py 的 /lite 外壳（iframe 套 iframe）注入的。现在不再套外壳 ——
+# 原因见 api_cad_preview 里 `embed=1` 处的长注释：
+#   飞牛 App 的 Android WebView 在**两层 iframe 的内层**里不执行脚本
+#   （HTML/CSS 正常渲染，但 <script> 一条都不跑、子资源一个都不请求）。
+# 所以只能把 /cad/ 本身作为 iframe 文档，由它自己带上这段 CSS。
+# 选择器与 pages.py 的 _LITE_HIDE["cad"] **同源**，避免两处漂移。
+# ============================================================================
+_EMBED_CSS_MARK = "nb-cad-embed-css"
+
+
+def _embed_css() -> bytes:
+    try:
+        from .pages import _LITE_HIDE  # 延迟导入，避免模块级循环依赖
+
+        sels = ",".join(_LITE_HIDE["cad"])
+    except Exception:
+        sels = ""
+    css = (
+        "html,body{margin:0!important;padding:0!important;height:100%!important;"
+        "overflow:hidden!important;background:#fff;}"
+    )
+    if sels:
+        css += (
+            sels
+            + "{display:none!important;visibility:hidden!important;"
+            "height:0!important;min-height:0!important;width:0!important;"
+            "min-width:0!important;margin:0!important;padding:0!important;"
+            "border:0!important;overflow:hidden!important;}"
+        )
+    # 布局修正（每条都是实测出来的，原样搬自 pages.py）
+    css += (
+        "/* nb-cad-hide-v6 */"
+        ".ml-cad-main{top:0!important;height:100%!important;}"
+        ".ml-cad-container{top:0!important;height:100%!important;}"
+    )
+    return ('<style id="' + _EMBED_CSS_MARK + '">' + css + "</style>").encode("utf-8")
+
+
+def _inject_embed_css(content: bytes, content_type: str) -> bytes:
+    if "text/html" not in (content_type or "").lower():
+        return content
+    if _EMBED_CSS_MARK.encode() in content:
+        return content
+    css = _embed_css()
+    for anchor in (b"<head>", b"<HEAD>"):
+        if anchor in content:
+            return content.replace(anchor, anchor + css, 1)
+    return css + content
+
+
 @router.get("/api/cad/preview")
 async def api_cad_preview(
     request: Request,
-    mount: str = "", path: str = "", user: dict = Depends(auth.current_user),
+    mount: str = "", path: str = "", embed: str = "",
+    user: dict = Depends(auth.current_user),
 ):
     """返回 cad-viewer 的深链地址（同源反代路径）。
 
@@ -152,13 +223,52 @@ async def api_cad_preview(
     # 深链走**同源反代**前缀 /cad，避免暴露 cad-viewer 的独立端口、
     # 也顺带绕开跨域与混合内容问题。
     inner = f"/cad/?{q}"
-    # ★ 再包一层 /lite 外壳 ⇒「页面嵌入块」形态（2026-09-30 用户要求）★
-    #   直接给 /cad/ 会看到**一整台 CAD 程序**：顶部功能区（文件/视图/插入…）、
-    #   右侧垂直工具条、底部命令行 + 状态栏全在。预览只需要图纸本身，
-    #   由 /lite 外壳的 _LITE_HIDE 用 CSS 把那些块收掉。
-    #   详见 integrations.lite_shell_url 的注释。
-    url = integrations.lite_shell_url("cad", inner, p.name)
-    return {"ok": True, "url": url, "inner": inner, "raw": public_raw}
+    # ★★ 不再套 /lite 外壳（2026-10-03）★★
+    # ------------------------------------------------------------------
+    # 原来这里是：url = integrations.lite_shell_url("cad", inner, p.name)
+    # 即 SPA 里再嵌一层 iframe：SPA → /lite → /cad/。
+    #
+    # 换成直接给 `/cad/?…`（那时一律再拼 `&embed=1`，由 /cad/ 自己注入「收 UI」
+    # 的 CSS，见文首 _inject_embed_css）。★ 2026-10-04 起 embed 改为**显式可选**，
+    # 见下面「默认给完整界面」那一段。★
+    #
+    # 【为什么必须去掉这一层】飞牛 App 的 Android WebView 在**两层 iframe 的
+    #   内层**里**根本不执行脚本**：HTML/CSS 照常渲染（所以用户能看到 CAD 页面
+    #   自己的转圈圈动画），但 <script> 一条都不跑、子资源一个都不请求。
+    #
+    #   实证（全是日志/探针硬证据）：
+    #     · 手机：`/cad/` 200，但 `/cad/assets/*` **0 条**，注入的内联探针
+    #       **0 条回传**（双通道：Image 信标 + postMessage 中转）；
+    #       全量日志里手机**从未请求过任何含 assets 的路径**。
+    #     · 同机同源、**只有一层 iframe** 的 KK 预览：`/preview/js/*` 6 个全 200 ✅
+    #       （且 KK 用的也是相对路径 ⇒「基准跑偏」假说已被这条对照反证掉）。
+    #     · 同机的一层 iframe 的 OO 编辑器：修好地址后完全正常 ✅
+    #     · 桌面 Chrome：两层也一样正常（17 次 /cad/assets/* 全 200，含 9.9MB wasm）
+    #   ⇒ 差异变量只剩「有没有套 /lite」，与模块/相对路径无关。
+    #
+    #   ⚠️ 副作用：CSS 注入按 id 幂等，所以插件侧（SiYuan 嵌入块）若自己再套一层
+    #      /lite，或者自己也拼了 embed=1，都不会重复/冲突。
+    # ★★ 默认给**完整界面**（2026-10-04 用户要求）★★
+    # ------------------------------------------------------------------
+    #   用户原话：「CAD viewer 显示完整界面，包含菜单，工具条。」
+    #
+    #   演变史（别再倒回去）：
+    #     v4/v5  往 localStorage 播种 isShowXxx=false —— 因 per-origin 污染被弃用
+    #     2026-10-03  去掉 /lite 外壳，改成 `/cad/?…&embed=1`，由 /cad/ 自己注入
+    #                 「收 UI」的 CSS（三层 iframe 在手机 WebView 里不执行脚本，
+    #                 所以外壳必须去掉；收 UI 改用 CSS 注入）。
+    #     ★ 本次：收 UI 这件事**不再默认做** —— 用户要看到 CAD 的菜单与工具条。
+    #
+    #   ⇒ 默认 `url` **不带 embed=1**（= 完整界面）；
+    #     需要「收 UI」的调用方在 URL 上**显式**带 `embed=1`，机制原样保留
+    #     （见下方 proxy_cad 里对 `embed=1` 的判据，以及 cad.py 文首 _embed_css）。
+    #     传参方式：`/api/cad/preview?mount=…&path=…&embed=1`。
+    #
+    #   ⚠️ 不再套 /lite 外壳这条**继续有效**（与 embed 无关），原因见下面的大段注释。
+    # ------------------------------------------------------------------
+    want_embed = str(embed or "").strip().lower() in ("1", "true", "yes", "on")
+    url = inner + "&embed=1" if want_embed else inner
+    return {"ok": True, "url": url, "inner": url, "embed": want_embed, "raw": public_raw}
 
 
 @router.api_route("/cad/{rest:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"])
@@ -216,10 +326,22 @@ async def proxy_cad(rest: str, request: Request):
     #   content-length 已在上面被剔除，Starlette 会按新长度重算，不会错位。
     content = r.content
     if r.status_code == 200:
+        ct = r.headers.get("content-type", "")
         try:
-            content = _inject_unpoison(content, r.headers.get("content-type", ""))
+            content = _inject_unpoison(content, ct)
         except Exception:
             content = r.content  # 注入失败也要保证页面能打开
+        try:
+            # ★ 嵌入预览形态（`embed=1`）：收掉 CAD 的工具栏/命令行/状态栏 ★
+            if "embed=1" in (request.url.query or ""):
+                content = _inject_embed_css(content, ct)
+        except Exception:
+            pass
+        try:
+            # ★ 修复尝试：相对引用改绝对 + 去掉 crossorigin（见 _rewrite_html 注释）★
+            content = _rewrite_html(content)
+        except Exception:
+            pass
 
     return Response(
         content=content,

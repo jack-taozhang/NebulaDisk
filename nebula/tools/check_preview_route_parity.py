@@ -24,6 +24,26 @@
   [4] 分享预览接口（share_guest.py）认得的 route 词表
       与 route_of() 的返回值集合一致
       （漏一个 = 该类型在分享页静默退化成 kk，正是本次事故的形态）
+  [5] CAD 深链的**形态**：cad.py 与 share_guest.py 给出的地址必须同形
+      —— **默认都不带 `&embed=1`（= 完整界面）**，
+         且**都不许再套 /lite 外壳**。
+      2026-10-03 事故：网盘那条已去掉 /lite（飞牛 App 的 WebView 在两层 iframe
+      的内层里**不执行脚本** ⇒ CAD 一直转圈），分享页那条忘了改
+      ⇒ 同一个图纸「网盘能开、分享页打不开」。
+      这类漂移同样**不会报错**，只会在换设备/换入口时暴露。
+      ★ 2026-10-04 契约反转（用户要求「CAD viewer 显示完整界面，包含菜单，
+        工具条」）：embed=1 从「默认拼接」改为「**显式可选**」——
+        判据随之换成三条，缺一不可：
+          (a) 两边都**不许无条件**拼 &embed=1（否则又变成看不到菜单/工具条）；
+          (b) cad.py 必须保留**条件拼接**（`inner + "&embed=1" if <cond>`）；
+          (c) cad.py 的 /cad/ 代理必须仍认显式 `embed=1`（收 UI 的机制别删）。
+  [6] 视频「能播」入口的**覆盖率**：所有会把视频字节直接交给浏览器的入口，
+      都必须接入 H.265 探测/转码（即出现 `_detect_vcodec`）。
+      目前三个入口：网盘 /api/play、分享页 /api/s/{t}/play、直链 /f/{t}。
+      2026-10-03 事故：只给网盘那条腿接了转码，**分享页和直链都漏了**
+      ⇒ 同一个 HEVC 视频「网盘能播、分享页/直链打不开」。
+      （飞牛 App 的 Android WebView 不解 H.265；同一个文件电脑 Chrome 正常。）
+      这是**语义性**检查（有没有接），参数是否一致靠「共用同一个函数」来保证。
 
   ★ 只看 AST/正则，不执行 JS，也不起服务 ★
     所以它能进 run_static_checks.sh，在没有 docker、没有网络的机器上跑。
@@ -162,6 +182,92 @@ def parse_share_routes(py_path: Path) -> set:
     return {r for r in ROUTES if re.search(r"""['"]%s['"]""" % r, body)}
 
 
+# CAD 深链形态的判据（★ 2026-10-04 随契约反转重写 ★）
+#   旧契约：默认拼 `&embed=1`（收 UI）。新契约：默认**完整界面**，
+#   embed=1 只在调用方显式要求时才拼 —— 所以判据也换了一套：
+#
+#   `inner + "&embed=1" if <cond> else …` 这种**带条件**的拼接 = 新形态 ✅
+#   `embed_inner = inner + "&embed=1"`    这种**无条件**的拼接 = 旧形态 ❌
+#     （无条件 = 用户永远看不到 CAD 的菜单/工具条）
+RE_EMBED_APPEND = re.compile(r"""\+\s*["']&embed=1["']""")
+#   /cad/ 代理里对「显式要求收 UI」的判据：`"embed=1" in (request.url.query or "")`
+#   机制被删掉时这条会转红（防止有人顺手把「收 UI」能力清空）。
+RE_EMBED_OPTIN = re.compile(r"""["']embed=1["']\s+in\b""")
+#   `lite_shell_url("cad", ...)` —— 一旦出现就说明又套回两层 iframe 了
+RE_LITE_CAD = re.compile(r"""lite_shell_url\s*\(\s*["']cad["']""")
+#   同一行里既拼了 &embed=1 又带 if ⇒ 是「条件拼接」（新形态）
+RE_EMBED_COND_LINE = re.compile(r"""["']&embed=1["'][^\n]*\bif\b""")
+
+
+def parse_cad_deeplink(py_path: Path) -> dict:
+    """CAD 深链的形态（只扫**代码行**，跳过注释行）。
+
+    返回：
+      lite          又套了 /lite 外壳（❌）
+      embed_uncond  **无条件**拼了 &embed=1（❌ 会让 CAD 看不到菜单/工具条）
+      embed_cond    有条件地拼 &embed=1（✅ 新形态，仅 cad.py 期望为 True）
+      embed_optin   /cad/ 代理仍认显式 embed=1（✅ 机制保留）
+    """
+    src = py_path.read_text(encoding="utf-8")
+    # 只跳过整行注释：本项目里这几处注释都在独立行上，足够。
+    code = "\n".join(ln for ln in src.splitlines()
+                     if not ln.lstrip().startswith("#"))
+    uncond = cond = False
+    for ln in code.splitlines():
+        if not RE_EMBED_APPEND.search(ln):
+            continue
+        if RE_EMBED_COND_LINE.search(ln):
+            cond = True
+        else:
+            uncond = True
+    return {
+        "lite": bool(RE_LITE_CAD.search(code)),
+        "embed_uncond": uncond,
+        "embed_cond": cond,
+        "embed_optin": bool(RE_EMBED_OPTIN.search(code)),
+    }
+
+
+# 视频「能播」的浏览器取流入口。
+#   (相对路径, 说明) —— 每个文件里都应出现 `_detect_vcodec`（转码探测的调用点）。
+#   ⚠️ 新增取流入口时**必须**加到这里，否则闸门不会替你看住它。
+PLAY_ENTRY_FILES = [
+    ("app/routers/fileops.py", "网盘 /api/play"),
+    ("app/routers/share_guest.py", "分享页 /api/s/{token}/play"),
+    # ★ 直链 `/f/{token}` **已从本清单移除**（2026-10-04）★
+    #   它自 2026-10-04 起「只有一种行为 = 下载」（恒 `Content-Disposition:
+    #   attachment`，没有 `dl` 参数、也没有内联预览分支）⇒ 它**不再把视频字节
+    #   交给浏览器内联播放** ⇒ 不需要转码。反过来说：给下载链路转码 = **数据损坏**
+    #   （用户下载到的就不是他上传的那个文件）。
+    #   ⇒ 所以这里**不能**再加回来。判据原文见 app/routers/pages.py 的
+    #     `short_open()`（搜「只有一种行为」）。
+]
+PLAY_MARKER = re.compile(r"\b_detect_vcodec\b")
+# ★ 判据用「词边界」而不是「裸子串」或「必须带括号」★
+#   这条判据在负向自检里被改了两次，两个错都值得记：
+#     ① 裸子串 `"_detect_vcodec" in code` —— 把调用改名成
+#        `_detect_vcodec_BROKEN(` **仍包含该子串** ⇒ 显示 ✅（**假绿**）。
+#     ② 必须带左括号 `\b_detect_vcodec\s*\(` —— 但真实代码是把函数**当参数**
+#        传给线程池的：`run_in_threadpool(fileops._detect_vcodec, p, st)`
+#        **没有左括号** ⇒ 三处全部误报（**假红**）。
+#   `\b_detect_vcodec\b`：`_detect_vcodec,` 能匹配（`,` 是非 word 字符），
+#   而 `_detect_vcodec_BROKEN` 匹配不上（`e` 与 `_` 之间没有词边界）。
+#   ⇒ 判据本身也要做**正反两向**的自检，只做一向必错。
+
+
+def parse_play_coverage(root: Path) -> list:
+    """返回 [(说明, 是否接入)] —— 逐个取流入口检查有没有接入转码探测。"""
+    out = []
+    for rel, label in PLAY_ENTRY_FILES:
+        try:
+            code = (root / rel).read_text(encoding="utf-8")
+        except OSError:
+            out.append((label, False))
+            continue
+        out.append((label, bool(PLAY_MARKER.search(code))))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # 检查
 # ---------------------------------------------------------------------------
@@ -217,6 +323,41 @@ def check(root: Path) -> list:
     if got != expect:
         problems.append("share_guest.py 的预览接口 route 词表 %s 与 route_of 的返回值 %s 不一致"
                         % (sorted(got) or "空", sorted(expect) or "空"))
+
+    # [5] CAD 深链形态：cad.py（网盘）与 share_guest.py（分享页）必须同形
+    cad_py = root / "app" / "routers" / "cad.py"
+    if not cad_py.exists():
+        problems.append("缺少文件：%s" % cad_py)
+        return problems
+    netdisk = parse_cad_deeplink(cad_py)
+    share_dl = parse_cad_deeplink(guest)
+    # (a) 两边都不许再套 /lite 外壳（老事故，与 embed 无关，继续守）
+    if netdisk["lite"] or share_dl["lite"]:
+        problems.append(
+            "CAD 深链又套回了 /lite 外壳（两层 iframe 在手机 WebView 里不执行脚本）"
+            "：cad.py=%s，share_guest.py=%s" % (netdisk["lite"], share_dl["lite"]))
+    # (b) 两边都不许**无条件**拼 embed=1 —— 否则用户看不到 CAD 的菜单/工具条
+    if netdisk["embed_uncond"] or share_dl["embed_uncond"]:
+        problems.append(
+            "CAD 深链**无条件**拼了 &embed=1 ⇒ CAD 会看不到菜单/工具条"
+            "（2026-10-04 用户要求默认完整界面；要收 UI 必须改成显式可选）"
+            "：cad.py=%s，share_guest.py=%s"
+            % (netdisk["embed_uncond"], share_dl["embed_uncond"]))
+    # (c) cad.py 必须保留「显式要求才收 UI」的能力：条件拼接 + 代理认 embed=1
+    if not netdisk["embed_cond"]:
+        problems.append(
+            "cad.py 缺少「显式请求才收 UI」的条件拼接"
+            "（应为 `inner + \"&embed=1\" if <条件> else inner`）")
+    if not netdisk["embed_optin"]:
+        problems.append(
+            "cad.py 的 /cad/ 代理不再认 `embed=1`（收 UI 的开关被删了）")
+
+    # [6] 视频「能播」入口覆盖
+    for label, ok in parse_play_coverage(root):
+        if not ok:
+            problems.append(
+                "取流入口未接入视频转码探测（%s）—— H.265 在该入口会打不开；"
+                "请像其它入口一样调用 fileops._detect_vcodec / _transcode_h264" % label)
     return problems
 
 
@@ -247,6 +388,26 @@ def report(root: Path) -> int:
     print("    [4] 分享预览接口 route 词表")
     print("        %s %s" % (", ".join(sorted(got)) or "空",
                             "✅" if got == set(o_backend) else "❌"))
+    try:
+        dl_net = parse_cad_deeplink(root / "app" / "routers" / "cad.py")
+        dl_share = parse_cad_deeplink(root / "app" / "routers" / "share_guest.py")
+    except OSError as e:
+        print("    [5] CAD 深链形态 ❌ 解析失败：%s" % e)
+    else:
+        # 新契约：默认完整界面（不无条件拼 embed）；机制（条件拼接 + 代理开关）必须还在
+        ok5 = ((not dl_net["lite"]) and (not dl_share["lite"])
+               and (not dl_net["embed_uncond"]) and (not dl_share["embed_uncond"])
+               and dl_net["embed_cond"] and dl_net["embed_optin"])
+        print("    [5] CAD 深链形态（默认完整界面 / embed 显式可选 / 不套 /lite）")
+        print("        无条件拼 embed：网盘 %s / 分享 %s（都应为 False）"
+              % (dl_net["embed_uncond"], dl_share["embed_uncond"]))
+        print("        条件拼接 %s ；代理认 embed=1 %s（cad.py 都应为 True）"
+              % (dl_net["embed_cond"], dl_net["embed_optin"]))
+        print("        套 /lite：网盘 %s / 分享 %s（都应为 False）   %s"
+              % (dl_net["lite"], dl_share["lite"], "✅" if ok5 else "❌"))
+    print("    [6] 视频「能播」入口覆盖（H.265 转码）")
+    for label, ok in parse_play_coverage(root):
+        print("        %-52s %s" % (label, "✅" if ok else "❌ 未接入"))
 
     problems = check(root)
     if problems:
@@ -308,11 +469,33 @@ def selftest() -> int:
             "def other():\n", encoding="utf-8")
         (base / "app" / "routers" / "share_guest.py").write_text(
             "async def api_share_preview(token):\n"
-            "    if r == \"cad\": pass\n"
+            "    if r == \"cad\":\n"
+            "        inner = \"/cad/?open=x\"\n"
+            "        return {\"route\": \"cad\", \"url\": inner, \"embed\": False}\n"
             "    if r == \"onlyoffice\": pass\n"
             "    if r == \"kkfileview\": pass\n"
             "    return {\"route\": \"download\"}\n"
             "async def other():\n", encoding="utf-8")
+        # ★ 第 [5] 条判据（CAD 深链形态，2026-10-04 新契约）要求存在 cad.py，
+        #   且里面同时有：① 条件拼接 ② 代理认 embed=1。
+        #   夹具必须**照新契约**给，否则会变成假红。★
+        (base / "app" / "routers" / "cad.py").write_text(
+            "def api_cad_preview(embed=\"\"):\n"
+            "    inner = \"/cad/?open=x\"\n"
+            "    want_embed = embed == \"1\"\n"
+            "    url = inner + \"&embed=1\" if want_embed else inner\n"
+            "    if \"embed=1\" in (q or \"\"):\n"
+            "        pass\n"
+            "    return {\"url\": url}\n", encoding="utf-8")
+
+        # ★ 判据 [6]（视频「能播」入口覆盖）要求三个取流入口都出现
+        #   `_detect_vcodec(` 调用 —— 正例夹具必须补齐，否则会**假红**。★
+        for _rel in ("app/routers/fileops.py", "app/routers/share_guest.py",
+                     "app/routers/pages.py"):
+            _f = base / _rel
+            _prev = _f.read_text(encoding="utf-8") if _f.exists() else ""
+            _f.write_text(_prev + "\n    codec = fileops._detect_vcodec(p, st)\n",
+                          encoding="utf-8")
 
         good = check(base)
         if good:
@@ -362,6 +545,79 @@ def selftest() -> int:
             print("    ✅ 坏例 B 被抓到（分享接口漏 cad）")
         else:
             print("    ❌ 坏例 B 漏检：%s" % pb)
+            ok = False
+
+        # —— 坏例 D：分享页的 CAD 深链又套回 /lite 外壳（第 [5] 条判据）——
+        badD = tmp / "bad_d"
+        shutil.copytree(base, badD)
+        (badD / "app" / "routers" / "share_guest.py").write_text(
+            "async def api_share_preview(token):\n"
+            "    if r == \"cad\":\n"
+            "        return {\"route\": \"cad\","
+            " \"url\": lite_shell_url(\"cad\", inner, name)}\n"
+            "    if r == \"onlyoffice\": pass\n"
+            "    if r == \"kkfileview\": pass\n"
+            "    return {\"route\": \"download\"}\n"
+            "async def other():\n"
+            # 保留判据 [6] 的接入点：坏例 D 只想验「深链形态」，
+            # 别让它顺带触发「未接入转码」，否则坏例语义就不纯了。
+            "    codec = fileops._detect_vcodec(p, st)\n", encoding="utf-8")
+        probsD = check(badD)
+        if any("/lite 外壳" in x for x in probsD):
+            print("    \u2705 坏例 D 被抓到（分享页 CAD 又套 /lite）")
+        else:
+            print("    \u274c 坏例 D 漏检：%s" % (probsD or "没有任何问题被报出"))
+            ok = False
+
+        # —— 坏例 F：CAD 深链又变成「无条件拼 embed=1」（= 用户看不到菜单/工具条）——
+        #   这是 2026-10-04 契约反转之后**最该被看住**的那种回退：
+        #   代码照样能跑、页面照样能开，只是 CAD 的菜单与工具条又没了。
+        badF = tmp / "bad_f"
+        shutil.copytree(base, badF)
+        (badF / "app" / "routers" / "cad.py").write_text(
+            "def api_cad_preview(embed=\"\"):\n"
+            "    inner = \"/cad/?open=x\"\n"
+            "    embed_inner = inner + \"&embed=1\"\n"
+            "    if \"embed=1\" in (q or \"\"):\n"
+            "        pass\n"
+            "    return {\"url\": embed_inner}\n", encoding="utf-8")
+        probsF = check(badF)
+        if any("无条件" in x for x in probsF):
+            print("    \u2705 坏例 F 被抓到（CAD 深链又无条件拼 embed=1）")
+        else:
+            print("    \u274c 坏例 F 漏检：%s" % (probsF or "没有任何问题被报出"))
+            ok = False
+
+        # —— 坏例 G：把「收 UI」的开关整个删掉（能力退化的另一种形态）——
+        badG = tmp / "bad_g"
+        shutil.copytree(base, badG)
+        (badG / "app" / "routers" / "cad.py").write_text(
+            "def api_cad_preview(embed=\"\"):\n"
+            "    inner = \"/cad/?open=x\"\n"
+            "    return {\"url\": inner}\n", encoding="utf-8")
+        probsG = check(badG)
+        if any("条件拼接" in x or "embed=1" in x for x in probsG):
+            print("    \u2705 坏例 G 被抓到（收 UI 的能力被删）")
+        else:
+            print("    \u274c 坏例 G 漏检：%s" % (probsG or "没有任何问题被报出"))
+            ok = False
+
+        # —— 坏例 E：某个取流入口没接 H.265 转码（第 [6] 条判据）——
+        #   ★ 这个坏例是**负向自检抓出来的**：第一版判据用裸子串
+        #     `"_detect_vcodec" in code`，把调用改名成 `_detect_vcodec_BROKEN(`
+        #     仍然包含该子串 ⇒ 显示 ✅（假绿）。改成带括号的正则后才真正生效。
+        badE = tmp / "bad_e"
+        shutil.copytree(base, badE)
+        _sg = badE / "app" / "routers" / "share_guest.py"
+        _sg.write_text(
+            _sg.read_text(encoding="utf-8").replace("_detect_vcodec(", "REMOVED("),
+            encoding="utf-8")
+        probsE = check(badE)
+        if any("未接入视频转码探测" in x for x in probsE):
+            print("    \u2705 坏例 E 被抓到（取流入口未接转码）")
+        else:
+            print("    \u274c 坏例 E 漏检：%s" % (probsE or "没有任何问题被报出"))
+            ok = False
             ok = False
 
         # —— 坏例 C：viewer.js 函数被改名（护栏自己别假装通过）——

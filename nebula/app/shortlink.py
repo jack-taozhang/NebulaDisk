@@ -5,8 +5,8 @@
 
 原先它们各有一套：
 
-  · `shortlink.py` —— `/f/<token>`，给「在浏览器中打开」/「复制直链」用。
-    token 12 字符、免登录、永久有效、只能取字节。
+  · `shortlink.py` —— `/f/<token>`，给「复制直链」用（**点击即下载**，2026-10-04 起）。
+    token 12 字符、免登录、默认 7 天、取字节；**点击即下载**（无第二形态）。
   · `shares.py`    —— `/s/<token>`，给「分享」用。token 32 字符、
     有落地页、可设有效期 / 提取码 / 访问次数。
 
@@ -77,14 +77,14 @@ revoke*/update/password_hash/verify_password/bump_visit` 全部保留原签名�
 ## ★ 安全模型（能力型 URL，刻意免登录）★
 
   · token = `secrets.token_urlsafe(9)` = **12 字符 / 72 bit** ⇒ 不可枚举、不可猜
-  · `/f/<token>` **不要求登录** —— 谁拿到链接谁能看（用户明确要的语义：
+  · `/f/<token>` **不要求登录** —— 谁拿到链接谁能取文件（用户明确要的语义：
     「免登录，链接即凭证 …… 可直接发同事」）
-  · **危险扩展名**（exe/bat/js/ps1… 见 `config.DANGEROUS_EXT`）在 `/f` 里
-    一律强制 `attachment`，绝不 inline
+  · 响应恒为 `Content-Disposition: attachment`（2026-10-04 起只有这一种形态，
+    见 routers/pages.py 的 `/f/{token}`）⇒ 不存在"内联渲染恶劣文件"的面
   · 映射可见性仍按链接的 `owner` 复核 ⇒ owner 已看不到该映射时，链接同步失效
   · 收回手段：① 删/改名/移动文件时由 `revoke_by_path` / `revoke_under_path`
     一并清掉 ② 显式撤销（`POST /api/links/revoke`）
-  · ⚠️ 别把短链贴到不受控的地方：它免登录、且（file 类）永久有效
+  · ⚠️ 别把短链贴到不受控的地方：它免登录、且（file 类）默认 7 天有效
 
 ## 建表为什么是惰性 + 幂等
 

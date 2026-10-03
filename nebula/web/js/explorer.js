@@ -32,6 +32,21 @@ const Explorer = (() => {
    *    - 进入子目录 → navigate() 原地换目录，同样不产生新窗口
    *  这样「双击文件夹冒出第二个窗口」从根上不可能再发生。
    */
+  /* ----------------------------------------------------------------------
+     ★ 临时诊断（2026-10-03，定位完删）★
+     借道 /__oodiag__ 这个必然 404 的路径，让信息落进 nebula-front 的 access log。
+     目的：手机「双击 mp4 毫无反应」—— 需要分清是
+       ① 触摸事件根本没落到行上（pointerdown 都不来）
+       ② 落了行、但 dblclick 没触发（被当成缩放手势）
+       ③ dblclick 触发了、但后面炸了（viewer.js 的 open 探针会给出）
+     ---------------------------------------------------------------------- */
+  function nbDiag(tag, info) {
+    try {
+      const s = `${tag}|${typeof info === 'string' ? info : JSON.stringify(info)}`.slice(0, 400);
+      (new Image()).src = `/__oodiag__/${encodeURIComponent(s)}?_=${Date.now()}`;
+    } catch { /* 尽力而为 */ }
+  }
+
   function open(mountLabel, initialPath = '', opts = {}) {
     const winId = `explorer:${mountLabel}`;
 
@@ -1048,12 +1063,9 @@ const Explorer = (() => {
       });
       items.push({
         label: '复制路径', icon: 'copy',
-        onClick: () => {
-          const t = e.path || '';
-          navigator.clipboard && navigator.clipboard.writeText(t)
-            .then(() => Toast.ok('已复制路径', t))
-            .catch(() => Toast.info('路径', t));
-        },
+        // ★ 2026-10-04：改走全局 `copyText`（原来直接摸 navigator.clipboard，
+        //   非安全上下文里它是 undefined ⇒ 同步抛 TypeError ⇒ 点了没反应）★
+        onClick: () => copyText(e.path || ''),
       });
     }
     ContextMenu.show(x, y, items);
@@ -1184,7 +1196,12 @@ const Explorer = (() => {
         updateStatus(body, S);
       });
 
+      tr.addEventListener('pointerdown', (ev) => {
+        nbDiag('row-pd', `${e.name}|${ev.pointerType}|b${ev.button}`);
+      });
+
       tr.addEventListener('dblclick', (ev) => {
+        nbDiag('row-dbl', e.name);
         ev.preventDefault();
         activate(body, S, e);
       });
@@ -1332,14 +1349,15 @@ const Explorer = (() => {
     const kind = EXT_KIND[(e.ext || '').toLowerCase()];
     if (kind === 'image' && e.size < 12 * 1024 * 1024) {
       // 图片用真实缩略图；解码失败时回退成图标（如损坏文件 / 非真图片）
-      return `<img class="tile-thumb" loading="lazy" src="${esc(imgUrl(e, S))}" alt=""
+      // w=192：格子显示 52px，按 DPR 3.x 留足余量（见 imgUrl 的说明）
+      return `<img class="tile-thumb" loading="lazy" src="${esc(imgUrl(e, S, 192))}" alt=""
                    onerror="this.replaceWith(Object.assign(document.createElement('span'),
                      {innerHTML: Icons.file('${esc(e.name).replace(/'/g, "\\'")}')}))">`;
     }
     return Icons.file(e.name);
   }
 
-  function imgUrl(e, S) {
+  function imgUrl(e, S, w) {
     S = S || state.cur;        // 兜底：理论上传参一定给，这里只是防御
     if (!S) return '';         // 再兜一层，绝不因缩略图把整个列表搞崩
     // ★ 搜索态必须用条目自带的完整相对路径 ★
@@ -1347,6 +1365,13 @@ const Explorer = (() => {
     //   继续用 joinPath(S.path, e.name) 会指向「当前目录下的同名文件」
     //   —— 要么 404 破图，要么（更糟）显示了**另一个**文件的缩略图。
     const p = (S.search && e.path) ? e.path : joinPath(S.path, e.name);
+    // ★ 传 w ⇒ 走 /api/thumb（后端按需缩放）★
+    //   不传 w 的老路径（/api/download?inline=true）给的是**原图**，
+    //   列表里只画 16px 却下载 3~5MB —— 见 fileops.py 的 api_thumb 说明。
+    if (w) {
+      const q = new URLSearchParams({ mount: S.mount, path: p, w: String(w) });
+      return '/api/thumb?' + q.toString();
+    }
     const q = new URLSearchParams({ mount: S.mount, path: p, inline: 'true' });
     return '/api/download?' + q.toString();
   }
@@ -1401,7 +1426,9 @@ const Explorer = (() => {
       // ★ imgUrl 必须能识别搜索态 ★
       //   搜索命中项可能来自任意子目录，用 joinPath(S.path, e.name) 拼会
       //   指向错误的路径（缩略图全变破图）。imgUrl 内部已按 S.search 分流。
-      return `<img class="row-thumb" loading="lazy" src="${esc(imgUrl(e, S))}" alt="">`;
+      // w=64：行内图标只有 16px，但手机 DPR 高（实测 3.25）⇒ 留 4 倍余量
+      // 这一点最关键 —— 此前这里直接拉**原图**，一个图片目录动辄两三百 MB。
+      return `<img class="row-thumb" loading="lazy" src="${esc(imgUrl(e, S, 64))}" alt="">`;
     }
     // 列表里图标尺寸小，复用同一套彩色图标即可
     return `<span style="display:grid;place-items:center;width:16px;height:16px"
@@ -1449,7 +1476,12 @@ const Explorer = (() => {
         }
       });
 
+      node.addEventListener('pointerdown', (ev) => {
+        nbDiag('row-pd', `${e.name}|${ev.pointerType}|b${ev.button}`);
+      });
+
       node.addEventListener('dblclick', (ev) => {
+        nbDiag('row-dbl', e.name);
         ev.preventDefault();
         activate(body, S, e);
       });
@@ -1699,13 +1731,11 @@ const Explorer = (() => {
     ]);
   }
 
-  /** 复制当前路径到剪贴板（功能保留，供其他地方调用） */
+  /** 复制当前路径到剪贴板（功能保留，供其他地方调用）。
+   *  ★ 2026-10-04：改走全局 `copyText` —— 失败时的兜底（手动复制框）交给它统一处理。 */
   async function copyCurrentPath(body, S) {
     const p = `${S.mount}${S.path === '/' ? '' : S.path}`;
-    try {
-      await navigator.clipboard.writeText(p);
-      Toast.ok('已复制', p);
-    } catch { Toast.error('复制失败', '浏览器拒绝了剪贴板访问'); }
+    await copyText(p);
   }
 
 
@@ -1834,7 +1864,7 @@ const Explorer = (() => {
        - 生成后**立刻把链接放进对话框并自动复制**（分享的最高频动作就是"拿到链接"）
        - 同一个对话框里可以「管理我的链接」——不用再去找别的入口
        - ★ 目标是**文件**时，顺手把「直链」也取回来一并显示（2026-09-30）★
-         一次拿到两种地址：分享链接（有落地页/提取码）与直链（免登录直取字节）。
+         一次拿到两种地址：分享链接（有落地页/提取码）与直链（免登录、点击即下载）。
          两者由后端同一张 links 表承载，管理也在同一处 ⇒
          用户那句「网盘里面自带的分享也纳入一起，采用短链的方式分享。
          管理纳入一起」在**一个对话框里就闭环**了。
@@ -1992,7 +2022,7 @@ const Explorer = (() => {
                直链是"立刻能用、默认 7 天"的那条，放上面；分享链接带落地页与
                提取码/次数，是"正式分享"那条，放下面。 -->
           <div data-role="directwrap" hidden>
-            <div class="share-label">直链（免登录 · 直接打开 / 下载）</div>
+            <div class="share-label">直链（免登录 · 点击即下载）</div>
             <div class="share-linkrow">
               <input type="text" data-role="direct" readonly>
               <button class="btn" data-role="dcopy">复制</button>
@@ -2051,15 +2081,20 @@ const Explorer = (() => {
         LinkManager.open();
       };
 
+      /**
+       * 复制链接输入框里的内容。
+       * ★ 2026-10-04：改走 `Clipboard.copy`（内含 execCommand 兜底）★
+       *   这里**不**用全局 `copyText`：输入框就在眼前，失败时把它全选比弹
+       *   「手动复制」框更顺手（用户在同一个弹窗里就能 Ctrl+C）。
+       */
       const copyFrom = async (input, label) => {
-        try {
-          await navigator.clipboard.writeText(input.value);
+        if (await Clipboard.copy(input.value)) {
           Toast.ok('已复制', label || '链接已复制到剪贴板');
-        } catch {
-          // 剪贴板被拒（非 HTTPS / 权限）：退回"选中让用户自己复制"
-          input.select();
-          Toast.info('请手动复制', '浏览器拒绝了剪贴板访问，已为你全选');
+          return;
         }
+        // 剪贴板被彻底拒绝（非 HTTPS / 权限 / iframe 策略）：退回"选中让用户自己复制"
+        try { input.focus(); input.select(); } catch (_) {}
+        Toast.info('请手动复制', '浏览器拒绝了剪贴板访问，已为你全选');
       };
 
       q('copy').onclick = () => copyFrom(q('link'));
@@ -2573,7 +2608,7 @@ const Explorer = (() => {
       </div>
       <div class="ip-preview">
         ${canThumb
-          ? `<img src="${esc(imgUrl(e, S))}" alt="">`
+          ? `<img src="${esc(imgUrl(e, S, 320))}" alt="">`
           : Icons.file(e.name, e.isDir)}
       </div>
       <div class="ip-name">${esc(e.name)}</div>

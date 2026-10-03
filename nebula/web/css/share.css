@@ -181,12 +181,22 @@ body {
 }
 .sh-main > .sh-fill { flex: 1 1 auto; min-width: 0; min-height: 0; }
 .sh-main > .sh-media-wrap {
+  position: relative;              /* .sh-media-tip 的定位基准 */
   flex: 1 1 auto; min-height: 0;
   display: flex; align-items: center; justify-content: center;
   background: #0b0d10;
 }
 .sh-main video.sh-media, .sh-main audio.sh-media { max-width: 100%; max-height: 100%; }
 .sh-main audio.sh-media { width: min(560px, 80%); }
+/* 浮层提示（「正在转码…」/「编码不支持」）。
+   底色固定深色 ⇒ 直接给深底白字，不跟随主题变量（跟随反而在浅色主题下看不清）。 */
+.sh-media-tip {
+  position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%);
+  max-width: 88%; padding: 8px 14px; border-radius: 8px;
+  background: rgba(0, 0, 0, .78); color: #fff;
+  font-size: 12.5px; line-height: 1.5; text-align: center;
+  pointer-events: none; z-index: 5;
+}
 
 .sh-main > .sh-text {
   flex: 1 1 auto; min-width: 0; min-height: 0;

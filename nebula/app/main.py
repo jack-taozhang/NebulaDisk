@@ -35,6 +35,7 @@ NebulaDisk —— FastAPI 应用（**只负责组装**）
 
 from __future__ import annotations
 
+import re
 import sys
 
 from fastapi import FastAPI, HTTPException, Request
@@ -210,3 +211,72 @@ async def _revalidate_static(request: Request, call_next):
     if p.startswith("/static/") or p in ("/", "/index", "/index.html"):
         resp.headers.setdefault("Cache-Control", "no-cache")
     return resp
+
+
+# ---------------------------------------------------------------------------
+# ★ 处理 OnlyOffice 的「版本前缀」（2026-10-03）★
+#
+# 现象（用户报）：打开 Office 文件，编辑器区域显示
+#     {"detail":"Not Found"}
+#   —— 正好 22 字节，是 **FastAPI 自己的 404**，说明有个请求落在网盘上了。
+#
+# 根因：
+#   OO 的 documentserver 会给静态资源加一个「版本号-构建哈希」前缀做缓存击穿。
+#   实测它把编辑器页 302 到：
+#     location: /9.4.0-ecbb0e49cc1ea88a1b0d1bb8911e035d/web-apps/apps/presentationeditor/main/index.html
+#   而我们在 routers/onlyoffice.py 里只注册了**不带前缀**的
+#   /web-apps、/sdkjs、/fonts … ⇒ 带前缀的请求谁也匹配不上 ⇒ FastAPI 404。
+#
+# ★ 为什么是「改写」而不是「剥掉」★★
+#   一开始我在这里把版本前缀**删掉**（/9.4.0-xxx/web-apps/x → /web-apps/x），
+#   结果必然**重定向死循环**：
+#       浏览器 → /web-apps/apps/.../index.html
+#       OO     → 302 到 /9.4.0-xxx/web-apps/apps/.../index.html
+#       中间件 → 又删成 /web-apps/apps/.../index.html  → 回到上一步
+#   因为那个带版本前缀的地址在 **OO 自己的 URL 空间里是真实有效的**
+#   （实测 GET /9.4.0-xxx/web-apps/apps/api/documents/api.js → 200）。
+#   ⇒ 正确做法是**原样转发给 OO**，只是需要一个安全的路由入口。
+#
+#   于是：中间件把它改写成 `/oo-ver/<原路径>`，由
+#   routers/onlyoffice.py 里注册的 `/oo-ver/{rest:path}` 原样转发。
+#   用独有的 `/oo-ver` 前缀是为了**避开路由顺序问题** —— 直接注册
+#   `/{版本}/...` 会与网盘自己的多段路由（如 /api/oo/health）抢匹配，
+#   FastAPI 匹配不上就 404、**不会回退到下一条路由**，注册顺序一变就出事。
+#
+# 安全性：只匹配「数字.数字.数字-十六进制」这种形状，误伤概率极低。
+# ---------------------------------------------------------------------------
+_OO_VERSION_PREFIX_RE = re.compile(r"^/(\d+\.\d+\.\d+-[0-9a-fA-F]+)(/.*)?$")
+
+
+class _OOVersionPrefixRewrite:
+    """把 OnlyOffice 的「版本前缀」路径改写成 `/oo-ver/<原路径>`（HTTP + WebSocket）。
+
+    ★★ 必须是**纯 ASGI 中间件**，不能用 `@app.middleware("http")` ★★
+       2026-10-03 实测：编辑器页能起来、toolbar 也出来了，但浏览器报
+         WebSocket connection to 'ws://…/9.4.0-<hash>/doc/<key>/c/' failed
+       ⇒ socket.io 只能退化成 polling（页面看似能用，实则慢且不稳）。
+
+       根因：`@app.middleware("http")` 只在 **HTTP** 作用域生效，
+       **WebSocket 握手根本不经过它** ⇒ 带版本前缀的 `ws://…` 路径没被改写
+       ⇒ 匹配不到 `/oo-ver/{rest:path}` 那条 WS 路由 ⇒ 握手失败。
+       纯 ASGI 中间件同时看到 `scope["type"] == "http"` 和 `"websocket"`，一次覆盖两种。
+
+    （本应用除 OnlyOffice 外没有别的 WebSocket 路由，改写不会误伤。）
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") in ("http", "websocket"):
+            p = scope.get("path", "")
+            if _OO_VERSION_PREFIX_RE.match(p):
+                # 复制后再改：别原地改上游传下来的 scope
+                scope = dict(scope)
+                new_path = "/oo-ver" + p
+                scope["path"] = new_path
+                scope["raw_path"] = new_path.encode()
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(_OOVersionPrefixRewrite)

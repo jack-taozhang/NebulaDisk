@@ -7,7 +7,7 @@ import time
 from fastapi import APIRouter, Form, Query, Request
 from fastapi.responses import HTMLResponse
 from .. import shares, shortlink
-from ..config import DANGEROUS_EXT, ext_of, settings
+from ..config import settings
 from ..webutil import WEB_DIR, _mount, _origin, _stream_file, probe_readable
 from ..share_web import _share_unlocked, _render_share_page
 
@@ -342,6 +342,21 @@ async def lite_shell(target: str = "", kind: str = "kk", title: str = ""):
         "var t1=setInterval(pump,300);"
         "setTimeout(function(){clearInterval(t1);},9000);"
         "__nbGuard(document);"
+        # ★ 临时：中转 iframe 内的诊断上报（postMessage → Image 信标）★
+        #   背景：手机端 CAD 页「卡住」，且服务端看不到它发出的任何子资源请求。
+        #   若子页面里连 fetch/Image 都被拦，这里是一条独立通道：
+        #   子页面 postMessage 给本页（不需要网络权限），本页再打点到 /__oodiag__。
+        #   与 cad.py 的 nb-cad-probe 配套，确认问题后一并删掉。
+        "try{"
+        "  window.addEventListener('message', function(ev){"
+        "    try{"
+        "      var d=ev&&ev.data;"
+        "      if(!d||typeof d!=='object'||!d.__nbrelay) return;"
+        "      var s='cadprobe-relay|'+String(d.__nbrelay).slice(0,300);"
+        "      (new Image()).src='/__oodiag__/'+encodeURIComponent(s)+'?r='+Math.random();"
+        "    }catch(e){}"
+        "  }, false);"
+        "}catch(e){}"
         "try{ document.documentElement.style.overscrollBehavior='contain'; }catch(e){}"
         "})();</" + "script>"
         "</body></html>"
@@ -585,8 +600,25 @@ def _link_error(msg: str, status: int) -> HTMLResponse:
     )
 
 
-def _want_download(raw: str) -> bool:
-    return str(raw).strip().lower() not in ("", "0", "false", "off", "no", "n")
+# 直链**只有一种行为：下载**。
+#
+#   ★★ 不再有 `?dl=` 开关（2026-10-04 用户要求）★★
+#     用户原话（两句要连起来看）：
+#       · 「直链 我记得之前 是下载功能。」
+#       · 「/f/<token> attachment 下载 ✅ 新默认 — 这个还是取消，不要有多个方式」
+#
+#     第一句确认**语义**：直链是"把文件给你"，不是"在浏览器里看"。
+#     第二句砍掉**形态**：不许留 `?dl=0` 那个内联出口 ——
+#     同一个地址两种行为，用户没法学，调用方还得替访客猜意图。
+#
+#     ⇒ 定死：`GET /f/<token>` 一律 `Content-Disposition: attachment`。
+#       想要"在浏览器里预览"请走**分享页** `/s/<token>`（那里有完整的
+#       路由决策：图片/视频原生、Office 走 OO、DWG 走 cad-viewer…），
+#       两条地址各司其职，而不是让直链长出第二副面孔。
+#
+#   ⚠️ 历史遗留的 `?dl=0` / `?dl=1` **不再解析**（query 被忽略，行为不变）。
+#      刻意不报 400 —— 已经发出去的链接里可能带着这些参数，
+#      报错等于把它们全变成死链。
 
 
 @router.post("/api/shortlink")
@@ -646,8 +678,24 @@ async def api_shortlink(
 
 
 @router.get("/f/{token}")
-async def short_open(token: str, request: Request, dl: str = ""):
-    """**直链**落地端：按 token 取到文件并内联吐字节。"""
+async def short_open(token: str, request: Request):
+    """**直链**落地端：按 token 取到文件，**一律下载**。
+
+    ★ 只有一种行为（2026-10-04 用户要求）★
+      用户原话（连起来看）：
+        · 「直链 我记得之前 是下载功能。」
+        · 「/f/<token> attachment 下载 ✅ 新默认 — 这个还是取消，不要有多个方式」
+      ⇒ 不再有 `dl` 参数、不再有内联预览分支。
+        设计理由写在 `/api/shortlink` 上方那段长注释里（本文件搜「只有一种行为」）。
+
+    ★ 为什么原来的「视频转码」分支也一并删了 ★
+      （2026-10-03 加的那段：HEVC ⇒ 转 H.264 再内联吐字节）
+      它存在的唯一理由是"浏览器要**内联播放**直链里的视频"。现在直链恒为
+      下载 ⇒ 必须给**原始字节**，用户下载到的才是他上传的那个文件。
+      转码在这里不再是优化，而是**数据损坏**。
+      （H.265 的"能播"需求由另外两个入口负责：网盘 `/api/play` 与
+        分享页 `/api/s/{t}/play` —— 它们才是给人"看"的，直链是给人"拿"的。）
+    """
     from .. import files as _files
 
     lk = shortlink.get_kind(token, shortlink.KIND_FILE)
@@ -681,20 +729,17 @@ async def short_open(token: str, request: Request, dl: str = ""):
     if p.is_dir():
         return _link_error("短链指向的是一个目录", 404)
 
-    want_dl = _want_download(dl)
-    # ★ 危险类型强制下载 ★
-    #   否则 /f/<token> 就等同于"免登录 + 长期有效 + 可直接执行/落盘"的通道。
-    if ext_of(p.name) in DANGEROUS_EXT:
-        want_dl = True
-
     # ★ 先探「内容读不读得出来」，**再**计数 ★
-    #   顺序反了的话：一个读不出内容的文件会白烧 max_visits 配额，
-    #   访问次数也会虚高 —— 用户根本没看到内容。
+    #   顺序反了的话：一个读不出内容的文件会白烧配额，访问次数也会虚高 ——
+    #   用户根本没拿到文件。
     probe_readable(p)
 
     shortlink.touch(token)
 
-    resp = _stream_file(p, download=want_dl)
+    # download=True ⇒ attachment + application/octet-stream，任何类型都一致。
+    # （危险类型 exe/bat/js… 以前要单独强制 attachment，现在全体都是下载，
+    #   那条特判已无意义 —— 语义上"下载"本身就是安全的那个选择。）
+    resp = _stream_file(p, download=True)
     # 短链语义是"取当前内容"，别让浏览器/中间层把旧字节缓存住
     resp.headers["Cache-Control"] = "no-store"
     return resp

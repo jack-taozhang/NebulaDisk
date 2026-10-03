@@ -7,3 +7,9 @@ python-multipart>=0.0.9          # FastAPI 的 Form/File 解析必需
 httpx>=0.27,<1.0                 # 反代 kkFileView + 下载 OnlyOffice 产物
 bcrypt>=4.1,<5.0                 # 密码哈希（纯轮子，不需要编译）
 eval_type_backport>=0.2          # Python 3.8/3.9 兼容新类型注解语法（str | None）
+pillow>=10.0                     # 图片缩略图（列表/网格视图用）。见 routers/fileops.py
+                                 # 的 /api/thumb 说明：不装也能跑（自动回退原图），
+                                 # 但手机上打开图片目录会变成下几百 MB 原图。
+imageio-ffmpeg>=0.5              # 自带静态 ffmpeg 二进制（含 libx264/aac），用于把
+                                 # H.265 视频按需转成 H.264。见 routers/fileops.py 的
+                                 # /api/play 说明：不装也能跑（回退原流 + 前端给提示）。

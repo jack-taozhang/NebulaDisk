@@ -4,7 +4,8 @@
 #
 #   ★ 本脚本给「离线包」用 ★
 #     离线包 = 本目录下同时有：
-#         nebula-<ver>.tar / nebula-cad-viewer-<ver>.tar   （docker save 产物）
+#         nebula-<ver>.tar / nebula-kkfileview-<ver>.tar / nebula-cad-viewer-<ver>.tar
+#                                                          （docker save 产物）
 #         docker-compose.yml                               （纯运行版，生成物）
 #         .env.example / _common.sh / install.sh / diagnose-oo.sh
 #     整套由 deploy/export-bundle.sh 生成。
@@ -85,6 +86,18 @@ else
   warn "没找到 nebula-cad-viewer-*.tar —— 跳过（dwg/dxf 预览将不可用）"
 fi
 
+# ---- KK 独立镜像（2026-10-04 起）----
+#   KK 不再包含在 nebula 镜像里；少导入它 = 所有非 Office 预览不可用。
+KK_TAR="$(ls "$CDIR"/nebula-kkfileview-*.tar 2>/dev/null | head -1)"
+if [ -n "$KK_TAR" ]; then
+  say "导入 kkFileView 镜像"
+  # 版本号同样从 tar 文件名取（与 compose 里 image: 的 tag 对齐）
+  KK_VER="$(basename "$KK_TAR" | sed -E 's#^nebula-kkfileview-([0-9][0-9.]*)\.tar$#\1#')"
+  if load_image_tar "$KK_TAR" "kkfileview:${KK_VER}"; then ok "kkFileView 镜像已导入"; else warn "kkFileView 镜像导入失败"; fi
+else
+  warn "没找到 nebula-kkfileview-*.tar —— 跳过（zip/pdf/图片/视频等预览将不可用）"
+fi
+
 # ---------------------------------------------------------------------------
 say "3/6 准备 .env"
 env_bootstrap "$CDIR" "$CDIR/.env.example" || exit 1
@@ -101,14 +114,14 @@ ensure_host_dirs "$CDIR/.env" "$CDIR"
 
 # ---------------------------------------------------------------------------
 say "5/6 启动"
-# 离线包的编排是「纯运行版」（无 build:），三个服务共用 nebula-net，不需要外部网络
+# 离线包的编排是「纯运行版」（无 build:），四个服务共用 nebula-net，不需要外部网络
 if $COMPOSE -f "$COMPOSE_FILE" --project-directory "$CDIR" up -d; then ok "compose up 完成"
 else bad "compose up 失败，请查看上面的报错"; exit 1; fi
 wait_healthy 180 || true
 
 # ---------------------------------------------------------------------------
 say "6/6 验证"
-$DK ps --format '  {{.Names}}\t{{.Status}}' 2>/dev/null | grep -E 'nebula|onlyoffice|cad-viewer' || true
+$DK ps --format '  {{.Names}}\t{{.Status}}' 2>/dev/null | grep -E 'nebula|kkfileview|onlyoffice|cad-viewer' || true
 echo
 echo -n "  云盘 healthz： "
 $DK exec nebula curl -s --max-time 8 http://127.0.0.1:8088/healthz 2>/dev/null || echo "(取不到)"

@@ -16,6 +16,60 @@
 const Viewer = (() => {
 
   /* ----------------------------------------------------------------------
+     ★ 每次载入都刷新「浏览器真实 host / 协议」Cookie（2026-10-03）★
+     ----------------------------------------------------------------------
+     为什么必须放在**顶层**，而不是只在 openOnlyOffice 里写：
+
+       飞牛 App 是**按会话分配端口**的（实测见过 34043 / 42651 / 46023 三个），
+       而 Cookie 不区分端口 ⇒ 上一次会话写下的 `oo_host=<旧端口>` 会一直留着。
+       nginx 的 `$fwd_host`（即后端 `_origin()` 拼绝对地址的依据）会沿用这个值，
+       于是**新会话里生成的图纸/文档地址指向上一次会话的端口** ⇒ 浏览器跨源取不到
+       ⇒ CAD 一直转圈。
+
+       实证（2026-10-03 探针 + nginx 日志）：
+         · `/api/cad/preview` 请求：`fwd=office.app.5ddd.com:34043`（旧 Cookie）
+           而 `ref="https://office.app.5ddd.com:46023/"`（浏览器真实当前地址）
+           ⇒ 后端把图纸地址拼成 `…:34043/api/raw/xxx.dwg`
+         · 页面在 `:46023` ⇒ 跨源 ⇒ 图纸与 libredwg-web.wasm 都取不到（各 0 条请求）。
+
+       nginx 侧已同时改成「Referer 优先、Cookie 兜底」；
+       这里再保证**没有 Referer 的请求（如 WebSocket 握手）**也能拿到当次会话的 host。
+     ---------------------------------------------------------------------- */
+  try {
+    document.cookie = `oo_host=${location.host}; path=/; SameSite=Lax`;
+    document.cookie = `oo_proto=${location.protocol.replace(':', '')}; path=/; SameSite=Lax`;
+  } catch { /* 尽力而为 */ }
+
+  /* ----------------------------------------------------------------------
+     ★ 临时诊断上报（2026-10-03，定位完必须删）★
+     ----------------------------------------------------------------------
+     借道一个必然 404 的路径，**目的只是让它落进 nebula-front 的 access log**
+     （不依赖后端加接口、不依赖三方服务）。日志里搜 `__oodiag__` 即可。
+
+     原本它只是 openOnlyOffice() 里的局部函数，所以「媒体/图片等原生路径」
+     根本不上报 —— 而手机上「点 mp4 毫无反应、服务端零请求」正好落在盲区里。
+     现在提升到模块级，并额外挂全局错误捕获，覆盖**所有**打开路径。
+     ---------------------------------------------------------------------- */
+  const diag = (tag, info) => {
+    try {
+      const s = `${tag}|${typeof info === 'string' ? info : JSON.stringify(info)}`.slice(0, 700);
+      const img = new Image();
+      img.src = `/__oodiag__/${encodeURIComponent(s)}?_=${Date.now()}`;
+    } catch { /* 尽力而为，绝不影响主流程 */ }
+  };
+
+  // 全局兜底：任何未捕获的异常/拒绝都上报（一次注册，覆盖全部路径）
+  try {
+    window.addEventListener('error', (ev) => {
+      diag('win-error', `${(ev && ev.message) || ''} @ ${(ev && ev.filename) || ''}:${(ev && ev.lineno) || 0}`);
+    });
+    window.addEventListener('unhandledrejection', (ev) => {
+      const r = ev && ev.reason;
+      diag('win-reject', String((r && r.message) || r || '').slice(0, 200));
+    });
+  } catch { /* 忽略 */ }
+
+  /* ----------------------------------------------------------------------
      预览上下文：记录「当前窗口是从哪个文件夹、按什么顺序打开的」
      ----------------------------------------------------------------------
      需求（原文）：「在预览窗口，增加可以切换上一个和下一个文件。
@@ -233,6 +287,12 @@ const Viewer = (() => {
     const name = path.split('/').pop();
     const ctx = makeCtx(mount, path, siblings, dirPath);
 
+    // ★ 临时诊断：到底走没走到这里、判成了什么（2026-10-03，定位完删）★
+    //   手机上「点 mp4 毫无反应、服务端零请求」需要先确认是**没进 open()**
+    //   （多半是单点/双击的差别）还是**进了 open() 但后面炸了**。
+    diag('open', `${name}|ext=${ext}|route=${(entry && entry.route) || '-'}`
+      + `|native=${nativeKind(ext)}|n=${(siblings || []).length}`);
+
     // 1) CAD 图纸 → 独立 cad-viewer 服务（渲染质量最好，优先于其它引擎）
     if (entry && entry.route === 'cad') {
       return openCAD(mount, path, name, ctx);
@@ -293,6 +353,16 @@ const Viewer = (() => {
    * 由各 openXxx 注册进 reg（见下），这样 step() 不必知道引擎细节。
    */
   const reg = new Map();   // winId -> (mount, path, entry) => void
+  // ★ winId -> DocsAPI.DocEditor 实例（2026-10-03 加）★
+  //   为什么必须有这个 Map：OnlyOffice 的编辑器实例**吃内存极大**
+  //   （单 sdk-all.js 就 28.8MB，运行时还要建 canvas / WebSocket / 各种定时器），
+  //   而原来的 onClose 只清 reg/ctxOf，**从不调用 destroyEditor()**
+  //   ⇒ 窗口关掉的只是 DOM，JS 实例还活着、内存不还。
+  //   手机（飞牛 App 的 webview）内存本来就紧，用户连开几次 Office 文件后
+  //   （实测 13:53–14:04 反复打开同一个 xlsx 8 次，日志里出现 5 个
+  //     frameEditorId=oo-host-oo_____-1…-5）内存会累积到撑不住
+  //   ⇒ 编辑器起不来、报「下载失败」。关窗必须显式销毁。
+  const editors = new Map();   // winId -> editor
 
   function reopenInto(winId, mount, path, entry) {
     const fn = reg.get(winId);
@@ -322,6 +392,21 @@ const Viewer = (() => {
 
   const rawUrl = (mount, path, inline = false) =>
     API.downloadUrl(mount, path, inline);
+
+  /* ----------------------------------------------------------------------
+     视频「能播」地址  GET /api/play
+     ----------------------------------------------------------------------
+     服务端会探测视频轨编码：**不是 HEVC 就 302 回原来的流**（零成本、行为不变），
+     是 HEVC 才用 ffmpeg 转成 H.264 再发（结果落盘缓存）。
+
+     为什么不一开始就用它：非 HEVC 时每一次 Range 请求都要多过一次探测，
+     而原流本来就没问题 —— 没必要绕。
+     所以**只在原生播放报「格式不支持」(error.code=4) 时才切过来**。
+     背景：手机 WebView 不解 H.265 —— 同一个 mp4 电脑能播、手机黑屏，
+     就是这一条。详见后端 routers/fileops.py 的 /api/play 说明。
+     ---------------------------------------------------------------------- */
+  const playUrl = (mount, path) =>
+    '/api/play?' + new URLSearchParams({ mount, path }).toString();
 
   /* ----------------------------------------------------------------------
      上一个 / 下一个（各预览窗口共用的导航条）
@@ -504,6 +589,20 @@ const Viewer = (() => {
   /* ----------------------------------------------------------------------
      媒体播放器
      ---------------------------------------------------------------------- */
+  /* 在媒体窗口里浮一条提示（「正在转码…」/「编码不支持」）。
+     故意不做成 modal：转码是后台行为，期间用户仍能拖进度条、点下载。 */
+  function showMediaTip(body, text) {
+    const stage = body.querySelector('.media-stage');
+    if (!stage) return;
+    let t = stage.querySelector('.media-tip');
+    if (!t) {
+      t = document.createElement('div');
+      t.className = 'media-tip';
+      stage.appendChild(t);
+    }
+    t.textContent = text;
+  }
+
   function openMedia(mount, path, name, kind, ctx) {
     const id = `media:${mount}:${kind}-${++viewSeq}`;   // ★ id 不含 path，见 openImage 的说明
     setContext(id, ctx);
@@ -531,6 +630,51 @@ const Viewer = (() => {
         if (handleNavClick(id, b.dataset.a)) return;
         if (b.dataset.a === 'save') download(m2, p2, nm);
       });
+
+      // ★ 临时诊断：媒体元素到底走没走（2026-10-03，定位完删）★
+      //   三件事分开看：
+      //     media-el    元素建出来了、src 是什么
+      //     media-meta  浏览器真的取到流并解出元数据（= 有网络请求且成功了）
+      //     media-err   取流/解码失败（error.code：1中止 2网络 3解码 4不支持）
+      //   若只有 media-el、两条都没来 ⇒ 浏览器**根本没发请求**
+      //   （Android WebView 的自动播放策略 / src 不可达都会这样）。
+      try {
+        const mediaEl = body.querySelector('video,audio');
+        if (mediaEl) {
+          diag('media-el', `${kind}|${src}`);
+          mediaEl.addEventListener('loadedmetadata', () => diag(
+            'media-meta',
+            `${mediaEl.videoWidth || 0}x${mediaEl.videoHeight || 0}|rs=${mediaEl.readyState}`));
+
+          // ── 播放失败自愈：H.265 自动转码 ─────────────────────────────
+          //   error.code === 4（MEDIA_ERR_SRC_NOT_SUPPORTED）= 编码/容器不支持。
+          //   实测最常见的是 **H.265 / HEVC**：桌面 Chrome 能解，而飞牛 App 的
+          //   Android WebView 解不了 ⇒ 同一个文件「电脑能播、手机黑屏」。
+          //   这里自动切到 /api/play（服务端探到 HEVC 才转码），并给出提示——
+          //   否则用户只看到黑屏，不知道在等什么。
+          //   ⚠️ 只重试一次，且**只在 code=4 时**：网络中断(2)/解码出错(3)重试没意义。
+          let retried = false;
+          mediaEl.addEventListener('error', () => {
+            const code = (mediaEl.error && mediaEl.error.code) || 0;
+            diag('media-err', `${code}|${(mediaEl.error && mediaEl.error.message) || ''}`);
+
+            if (kind !== 'video') return;
+            if (code !== 4) return;
+            if (retried) {
+              showMediaTip(body,
+                '这个视频当前设备打不开。可点上方「下载」用本地播放器打开。');
+              return;
+            }
+            retried = true;
+            showMediaTip(body, '正在转码，请稍候…（该视频为 H.265 编码，首次播放需转换）');
+            mediaEl.src = playUrl(m2, p2);
+            mediaEl.load();
+            mediaEl.play().catch(() => { /* 自动播放被拦就等用户点播放 */ });
+          });
+        } else {
+          diag('media-el', 'NONE');
+        }
+      } catch { /* 忽略 */ }
     };
 
     reg.set(id, (m2, p2) => {
@@ -626,10 +770,9 @@ const Viewer = (() => {
           pre.style.whiteSpace = wrapped ? 'pre-wrap' : 'pre';
           pre.style.wordBreak = wrapped ? 'break-word' : 'normal';
         } else if (a === 'copy') {
-          try {
-            await navigator.clipboard.writeText(pre.textContent);
-            Toast.ok('已复制', '全文已复制到剪贴板');
-          } catch { Toast.error('复制失败', '浏览器拒绝了剪贴板访问'); }
+          // ★ 2026-10-04：改走全局 `copyText`（原来只认 navigator.clipboard，
+          //   在 App WebView / http:// 下点了没反应）★
+          copyText(pre.textContent, '全文已复制到剪贴板');
         } else if (a === 'save') {
           download(m2, p2, nm);
         }
@@ -901,6 +1044,70 @@ const Viewer = (() => {
     const id = `oo:${mount}-${++viewSeq}`;   // ★ id 不含 path，见 openImage 的说明
     setContext(id, makeCtx(mount, path, siblingsOrCtx, dirPath));
 
+    // ★★★ 临时诊断探针（2026-10-03，查完即删）★★★
+    //   背景：手机（飞牛 App 的 webview）打开 Office 报 OnlyOffice 自己的
+    //   「下载失败」，但**服务端一条相关请求都收不到**
+    //   （`/cache/files/<key>/Editor.bin` 手机 0 条、电脑 8 条），
+    //   从后端完全看不到真相 ⇒ 让客户端把关键信息"借道"回传：
+    //   请求一个必然 404 的路径，**目的只是让它落进 nebula-front 的 access log**
+    //   （不依赖后端加接口，也不依赖任何三方服务）。
+    //   日志里搜 `__oodiag__` 即可看到全部回传内容。
+    //   （已提升到模块级 —— 见文件顶部，因为「原生/媒体」路径也要上报）
+    diag('env', {
+      ua: navigator.userAgent.slice(0, 110),
+      origin: location.origin,
+      mobile: /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent),
+      sw: !!navigator.serviceWorker,
+      w: innerWidth, h: innerHeight, dpr: devicePixelRatio,
+    });
+    diag('ua-mobile-detect', /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent) ? 'MOBILE' : 'DESKTOP');
+
+    // ★★ 告诉 nginx「当前是哪个编辑器」（2026-10-03）★★
+    //   手机（飞牛 App 的 webview）里 OO 的 iframe 停在 about:blank，
+    //   它内部所有**相对** fetch 都被解析到根（/locale/zh.json 等）⇒ 404。
+    //   nginx 端要把这些裸路径补回 /web-apps/apps/<app>/main/ 前缀，
+    //   但**它认不出是哪个 app** —— 因为那种请求的 Referer 是父页面根地址
+    //   （`https://<host>/`），里面没有 app 名。
+    //   ⇒ 只能由父页面（这里）提前把 app 名写进 Cookie，让 nginx 读得到。
+    //   （三个编辑器的 locale 文件内容各不相同，不能随便挑一个兜底。）
+    try {
+      const ext2 = (name.split('.').pop() || '').toLowerCase();
+      const appName = ['docx', 'doc', 'odt', 'rtf', 'txt'].includes(ext2) ? 'documenteditor'
+        : ['xlsx', 'xls', 'csv', 'ods'].includes(ext2) ? 'spreadsheeteditor'
+          : ['pptx', 'ppt', 'odp'].includes(ext2) ? 'presentationeditor'
+            : ext2 === 'pdf' ? 'pdfeditor' : '';
+      if (appName) document.cookie = `oo_app=${appName}; path=/; SameSite=Lax`;
+    } catch { /* 尽力而为 */ }
+
+    // ★★ 记下"浏览器实际使用的 host / 协议"（2026-10-03）★★
+    //   这是本次排查最关键的一环：手机（飞牛 App）经网关访问时，网关会**改写 Host 头**
+    //   （把 office.app.5ddd.com:35359 换成 nebuladisk-main.alumaple.fnos.net），
+    //   而后端 `_origin()` 与 OO 容器都按收到的 Host 生成**绝对地址**。
+    //   ⇒ OO 给出的文档下载地址变成 https://nebuladisk-main.../cache/files/…/Editor.bin
+    //     而手机只能访问 office.app.5ddd.com ⇒ 请求直接失败 ➜ OO 弹「下载失败」。
+    //
+    //   为什么不能只靠 Referer 修正 Host（已经踩过）：
+    //     · JS 发起的 **WebSocket `/doc/<key>/c/` 请求不带 Referer**（实测 ref="-"），
+    //       而 OO 正是用那条请求的 Host 生成 Editor.bin 地址 ⇒ 必须有别的来源。
+    //   ⇒ 由父页面主动把 host/proto 写进 Cookie（同域 Cookie 在 WS 握手里也会带上）。
+    try {
+      document.cookie = `oo_host=${location.host}; path=/; SameSite=Lax`;
+      document.cookie = `oo_proto=${location.protocol.replace(':', '')}; path=/; SameSite=Lax`;
+    } catch { /* 尽力而为 */ }
+
+    // ★ 诊断：Service Worker 状态（2026-10-03）★
+    //   OO 会注册 SW 来托管编辑器的请求。若 SW 在手机 webview 里注册/拦截异常，
+    //   请求会在 SW 内部就失败 ⇒ **网络上一条都看不到**，正好是本次的症状。
+    try {
+      if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+        navigator.serviceWorker.getRegistrations().then((rs) => {
+          diag('sw-list', rs.map((r) => (r.active && r.active.scriptURL) || r.scope).join(' , ') || '(none)');
+        }).catch((e) => diag('sw-list-fail', String(e).slice(0, 100)));
+      }
+    } catch { /* 忽略 */ }
+
+    //   （父页面自身的 JS 异常改由文件顶部的全局监听统一上报，这里不再重复注册）
+
     const render = (body, m2, p2, nm) => {
       // 统一工具栏：动作按钮靠左，翻页靠右，最小化/最大化/关闭由 Toolbar 贴最右
       const bar = WM.Toolbar.build({
@@ -970,16 +1177,32 @@ const Viewer = (() => {
         try {
           cfgResp = await API.ooConfig(m2, p2);
         } catch (e) {
+          diag('cfg-fail', String(e && e.message || e));
           fail('无法打开编辑器', e.message,
             `<button class="btn" data-role="fb" style="margin-top:14px">改用只读预览</button>`);
           return;
         }
 
+        // 诊断：把本次拿到的关键地址回传（看 apiJs / 文档 url / key 是否合理）
+        try {
+          const c = cfgResp.config || {};
+          diag('cfg', {
+            editorType: cfgResp.editorType,
+            apiJs: cfgResp.apiJs,
+            docUrl: (c.document || {}).url,
+            key: (c.document || {}).key,
+            type: c.type,
+            docType: c.documentType,
+          });
+        } catch { /* 忽略 */ }
+
         stateEl.textContent = cfgResp.mode === 'edit' ? '可编辑' : '只读';
 
         try {
           await loadOnlyOfficeApi(cfgResp.apiJs);
+          diag('api-ok', cfgResp.apiJs);
         } catch (e) {
+          diag('api-fail', `${cfgResp.apiJs} :: ${String(e && e.message || e)}`);
           fail('OnlyOffice 不可达', e.message,
             `<div class="sb-hint" style="margin-top:10px">
                请确认 OnlyOffice 容器已启动，且
@@ -1001,18 +1224,21 @@ const Viewer = (() => {
           width: '100%',
           height: '100%',
           events: {
-            onAppReady: () => { stateEl.textContent = '就绪'; },
-            onDocumentReady: () => { stateEl.textContent = '已就绪'; },
+            onAppReady: () => { diag('oo-ready', 'appReady'); stateEl.textContent = '就绪'; },
+            onDocumentReady: () => { diag('oo-docReady', 'documentReady'); stateEl.textContent = '已就绪'; },
             onDocumentStateChange: (e) => {
               stateEl.textContent = e.data ? '有未保存修改（自动保存中）' : '已保存';
             },
             onError: (e) => {
               console.error('[onlyoffice] 错误事件', e);
+              // ★ 诊断：OO 报的错误码是破案关键（-4=文档下载失败 / -2=打开超时）
+              diag('oo-onError', { data: e && e.data, code: e && e.errorCode, msg: describeOOError(e) });
               stateEl.textContent = '编辑器报错';
               Toast.error('OnlyOffice 报错', describeOOError(e));
             },
             onWarning: (e) => {
               console.warn('[onlyoffice] 警告', e);
+              diag('oo-onWarning', { data: e && e.data, msg: describeOOError(e) });
               Toast.info('OnlyOffice 提示', describeOOError(e));
             },
             onRequestClose: () => {
@@ -1028,6 +1254,87 @@ const Viewer = (() => {
           //     静态作用域闸门 `tools/_test_js_scope.js` 会因此报"未声明的标识符"。
           //     注解是"本文件的"外部全局声明，比往闸门白名单里堆名字准确。）
           editor = new DocsAPI.DocEditor(`oo-host-${cssId(id)}`, config);
+          editors.set(id, editor);   // ★ 登记给 onClose 用（见文件顶部说明）★
+
+          // ★★ 诊断（2026-10-03，查完即删）★★
+          //   拦截编辑器 iframe 内的 fetch / XHR，把「它想请求什么 URL」和
+          //   「为什么失败」回传上来。
+          //   为什么能做：OO 编辑器的 iframe 用相对路径（/9.4.0-…/web-apps/…）
+          //   创建 ⇒ 与父页面**同源** ⇒ 父页面拿得到 contentWindow，能包一层 fetch。
+          //   手机上恰恰是"请求一条都到不了服务器"，这一层是唯一能看到真相的地方。
+          let patched = false;
+          const patchTimer = setInterval(() => {
+            if (patched) return;
+            // ★ 放宽查找（第一版只找 `#oo-host-* iframe` 没命中，说明 OO 生成的
+            //   iframe 不一定挂在那层，或者 id/结构随版本不同）：
+            //   直接扫全页所有 iframe，挑 src 像编辑器的那个。
+            const all = [...document.querySelectorAll('iframe')];
+            const fr = all.find((f) => /web-apps|oo-ver/.test(f.getAttribute('src') || '')) || all[0];
+            if (!fr) return;
+            let w = null;
+            try { w = fr.contentWindow; } catch { /* 跨域，读不到就算了 */ }
+            if (!w) { diag('iframe-cw-blocked', all.length); patched = true; clearInterval(patchTimer); return; }
+            patched = true;
+            clearInterval(patchTimer);
+            try {
+              diag('iframe-found', `${all.length}|${(fr.getAttribute('src') || '').slice(0, 140)}`);
+              // ★ 决定性测量（2026-10-03）★
+              //   已知症状：iframe 内 fetch('locale/zh.json') 被解析成 **根路径**
+              //   `/locale/zh.json`（404），而 HTML 里 <link href="resources/...">
+              //   却解析到正确位置 ⇒ 说明 fetch 用的 baseURI 不是 iframe 自己的 URL。
+              //   这里把 iframe 的真实 location / baseURI / src 三者都量出来，
+              //   看它们是否一致（不一致就是根因所在）。
+              try {
+                diag('iframe-url', {
+                  src: (fr.getAttribute('src') || '').slice(0, 110),
+                  loc: String(w.location && w.location.href || '').slice(0, 110),
+                  base: String(w.document && w.document.baseURI || '').slice(0, 110),
+                  parent: String(location.href).slice(0, 80),
+                });
+              } catch (e) { diag('iframe-url-fail', String(e).slice(0, 100)); }
+              // iframe 内的 JS 异常（这是"编辑器起不来"最直接的证据）
+              w.addEventListener('error', (ev) => {
+                diag('frame-error', `${(ev && ev.message) || ''} @ ${(ev && ev.filename) || ''}:${(ev && ev.lineno) || 0}`);
+              });
+              w.addEventListener('unhandledrejection', (ev) => {
+                let r = '';
+                try { r = String((ev && ev.reason && (ev.reason.message || ev.reason)) || ''); } catch { /* */ }
+                diag('frame-reject', r.slice(0, 200));
+              });
+              const of = w.fetch;
+              if (of) {
+                w.fetch = function (...a) {
+                  const u = String((a[0] && a[0].url) || a[0]);
+                  // 带上"这次 fetch 时的 baseURI 尾巴"，用来验证相对路径为何解析到根
+                  let base = '';
+                  try { base = String(w.document.baseURI || '').slice(-58); } catch { /* */ }
+                  return of.apply(this, a).then(
+                    (r) => {
+                      if (!r.ok) diag('fetch-bad', `${r.status} ${u} [base=${base}]`);
+                      return r;
+                    },
+                    (e) => {
+                      diag('fetch-err', `${u} :: ${String(e).slice(0, 110)} [base=${base}]`);
+                      throw e;
+                    });
+                };
+              }
+              const xo = w.XMLHttpRequest && w.XMLHttpRequest.prototype.open;
+              if (xo) {
+                w.XMLHttpRequest.prototype.open = function (m, u, ...r) {
+                  this.addEventListener('error', () => diag('xhr-err', `${m} ${u}`));
+                  this.addEventListener('load', () => {
+                    if (this.status >= 400) diag('xhr-bad', `${this.status} ${m} ${u}`);
+                  });
+                  return xo.call(this, m, u, ...r);
+                };
+              }
+              diag('iframe-patched', 'ok');
+            } catch (e) {
+              diag('iframe-patch-fail', String(e).slice(0, 130));
+            }
+          }, 300);
+          setTimeout(() => clearInterval(patchTimer), 90000);
         } catch (e) {
           fail('编辑器初始化失败', e.message || String(e));
           return;
@@ -1046,6 +1353,7 @@ const Viewer = (() => {
           // ★ 翻页时先把旧的编辑器实例销毁，避免多个编辑器共用同一个 host ★
           try { editor && editor.destroyEditor(); } catch { /* 已销毁 */ }
           editor = null;
+          editors.delete(id);
           return;
         }
         if (a === 'save') {
@@ -1074,12 +1382,25 @@ const Viewer = (() => {
     });
 
     return WM.open({
-      id, title: `${name} — OnlyOffice`, icon: Icons.file(name),
+      id,       title: `${name} — OnlyOffice`, icon: Icons.file(name),
       width: 1200, height: 780, minWidth: 640, minHeight: 420,
       chromeless: true,   // 统一无标题栏外观；按钮行见 WM.Toolbar
       render: (body) => render(body, mount, path, name),
       // ★ 多开时 reg/ctxOf 以 winId 为 key 会随窗口数累积 ⇒ 关窗必须清理 ★
-      onClose: () => { reg.delete(id); ctxOf.delete(id); },
+      // ★★ 2026-10-03：**光清 Map 不够，必须 destroyEditor()** ★★
+      //   原来的实现只 reg.delete / ctxOf.delete ⇒ 关窗只拆了 DOM，
+      //   编辑器实例（几十 MB 内存 + WebSocket + 定时器）全都还活着。
+      //   手机上连开几个 Office 文件就撑爆 ⇒ 编辑器起不来 / 报「下载失败」。
+      //   实测：13:53–14:04 反复打开同一 xlsx 8 次，日志里出现 5 个
+      //   frameEditorId=oo-host-oo_____-1…-5（= 5 个编辑器实例同时活着）。
+      //   详见文件顶部 `editors` 的说明。
+      onClose: () => {
+        const e = editors.get(id);
+        if (e) { try { e.destroyEditor(); } catch { /* 已销毁 */ } }
+        editors.delete(id);
+        reg.delete(id);
+        ctxOf.delete(id);
+      },
     });
   }
 

@@ -2,17 +2,44 @@
 
 from __future__ import annotations
 
+import hashlib
 import mimetypes
+import subprocess
+import threading
+from io import BytesIO
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from starlette.concurrency import run_in_threadpool
 from .. import auth, files, shares, users
 from ..config import settings
 from ..webutil import _mount, _stream_file
 import os
+
+# ★ Pillow 是**可选**依赖 ★
+#   没装也能跑：/api/thumb 会静默回退到「直接给原图」（= 旧行为）。
+#   见下方 api_thumb 的说明。这样镜像里万一漏装，不至于整个网盘起不来。
+try:
+    from PIL import Image, ImageOps
+
+    _HAS_PIL = True
+except Exception:  # pragma: no cover
+    Image = ImageOps = None  # type: ignore[assignment]
+    _HAS_PIL = False
+
+# ★ imageio-ffmpeg 同样是**可选**依赖 ★
+#   它自带一个静态 ffmpeg 二进制（含 libx264 / aac），用来把 H.265 视频
+#   按需转成 H.264。没装时 /api/play 直接回退原流 + 前端给提示。
+try:
+    import imageio_ffmpeg
+
+    _HAS_FFMPEG = True
+except Exception:  # pragma: no cover
+    imageio_ffmpeg = None  # type: ignore[assignment]
+    _HAS_FFMPEG = False
+
 router = APIRouter()
 
 @router.get("/api/list")
@@ -212,6 +239,306 @@ async def api_download(
     m = _mount(user["username"], mount)
     p = files.resolve(m, path)
     return _stream_file(p, download=not inline)
+
+
+# ===========================================================================
+# 缩略图  GET /api/thumb?mount=&path=&w=
+#
+# ★ 为什么需要它（2026-10-03 实测）★
+#   列表/网格视图的缩略图**只显示 16px / 52px**，但此前的实现是把
+#   **原图**丢给浏览器（`<img src="/api/download?…&inline=true">`），
+#   只在 CSS 里缩小。手机相册里的照片动辄 3~5 MB：
+#
+#     实测：手机上打开「遂宁利和」目录，10 分钟内 61 次 /api/download、
+#           合计 **271 MB** 原图 —— 只为画 16px 的小方块。
+#           主线程被图片解码占住，页面发涩、双击都可能识别不出来。
+#
+#   这里按**需求宽度**生成缩略图并落盘缓存。设计要点：
+#     · 任何失败一律**回退原图**（没装 Pillow / 非图片 / 解码失败 / 写缓存失败）
+#       ⇒ 行为绝不比旧版差，也不会因为一张坏图让列表崩掉；
+#     · `Image.draft()` 让 JPEG 走 DCT 缩放（只解 1/2、1/4、1/8…），
+#       4000px 的照片毫秒级出图，峰值内存从几十 MB 降到几 MB；
+#     · `exif_transpose` 处理手机竖拍的方向，否则缩略图是躺着的；
+#     · 缓存 key 含 mtime_ns + size ⇒ 文件被覆盖后自动失效，不需要清缓存；
+#     · 宽度限幅 `_THUMB_MAX_W`，避免这个接口被当成图床用。
+# ===========================================================================
+_THUMB_MAX_W = 512          # 请求宽度的上限
+_THUMB_QUALITY = 82
+_THUMB_CACHE_DIR = "thumbs"
+_TRANSCODE_CACHE_DIR = "transcode"
+
+
+def _cache_dir(name: str) -> Path:
+    """按需生成物的落盘目录（跟数据库同盘，跟随 NEBULA_DATA_DIR 配置）。"""
+    d = Path(settings.data_dir) / name
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _thumb_cache_dir() -> Path:
+    return _cache_dir(_THUMB_CACHE_DIR)
+
+
+def _render_thumb(src: Path, w: int) -> bytes:
+    """把 src 缩放成宽度不超过 w 的 JPEG，返回字节。**阻塞**，请放线程池里跑。"""
+    im = Image.open(src)          # 只读文件头，不整图解码
+    try:
+        # ★ 关键：先让 JPEG 解码器自己降采样 ★
+        #   传「目标 2 倍尺寸」给它，libjpeg 会挑 1/1、1/2、1/4、1/8 里最合适的一档，
+        #   4000×3000 的图只需解 1000×750 —— 这是快与慢的分水岭。
+        im.draft("RGB", (w * 2, w * 2))
+        im = ImageOps.exif_transpose(im)   # 按 EXIF 摆正（手机竖拍）
+        im.thumbnail((w, w), Image.LANCZOS)
+        # 带透明通道的（PNG/WebP/GIF）要贴白底，否则转 RGB 后透明处变黑
+        if im.mode in ("RGBA", "LA", "P"):
+            im = im.convert("RGBA")
+            bg = Image.new("RGB", im.size, (255, 255, 255))
+            bg.paste(im, mask=im.split()[-1])
+            im = bg
+        elif im.mode != "RGB":
+            im = im.convert("RGB")
+        buf = BytesIO()
+        im.save(buf, "JPEG", quality=_THUMB_QUALITY, optimize=True, progressive=True)
+        return buf.getvalue()
+    finally:
+        try:
+            im.close()
+        except Exception:
+            pass
+
+
+@router.get("/api/thumb")
+async def api_thumb(
+    mount: str, path: str, w: int = 96,
+    user: dict = Depends(auth.current_user),
+):
+    m = _mount(user["username"], mount)
+    p = files.resolve(m, path)
+
+    # 没装 Pillow ⇒ 完全回退旧行为（给原图），网盘照常可用
+    if not _HAS_PIL:
+        return _stream_file(p)
+
+    w = max(16, min(int(w or 96), _THUMB_MAX_W))
+    try:
+        st = p.stat()
+        if not p.is_file():
+            raise OSError("not a file")
+    except OSError:
+        return _stream_file(p)
+
+    key = hashlib.sha1(
+        f"{p}|{st.st_mtime_ns}|{st.st_size}|{w}".encode("utf-8", "replace")
+    ).hexdigest()[:32]
+
+    try:
+        cache = _thumb_cache_dir() / f"{key}.jpg"
+    except OSError:
+        cache = None
+
+    if cache is not None and cache.is_file():
+        return FileResponse(
+            str(cache), media_type="image/jpeg",
+            headers={"Cache-Control": "private, max-age=86400"},
+        )
+
+    try:
+        # 解码是大头（且是 CPU 密集），必须丢线程池，别卡住事件循环
+        data = await run_in_threadpool(_render_thumb, p, w)
+    except Exception:
+        # 不是图片 / 损坏 / 格式不支持 ⇒ 回退原图（浏览器端 onerror 会兜住）
+        return _stream_file(p)
+
+    if cache is not None:
+        try:
+            tmp = cache.with_suffix(".jpg.tmp")
+            tmp.write_bytes(data)
+            tmp.replace(cache)      # 原子替换，避免并发读到半截文件
+        except OSError:
+            pass                    # 写不进去也无所谓，直接返回字节
+
+    return Response(
+        content=data, media_type="image/jpeg",
+        headers={"Cache-Control": "private, max-age=86400"},
+    )
+
+
+# ===========================================================================
+# 视频「能播」接口  GET /api/play?mount=&path=
+#
+# ★ 为什么需要它（2026-10-03 实测）★
+#   问题现象：同一个 mp4 电脑能播、手机报错。排查到最后是**编码**问题：
+#
+#     185c98aa….mp4  → 视频轨 `hvc1` = **H.265 / HEVC**  → 手机 ❌
+#       手机端探针：media-meta 能解出 1280x720，紧接着
+#       `MEDIA_ELEMENT_ERROR: Format error`（error.code=4 = 格式不支持）
+#     0.mp4          → 视频轨 `avc1` = H.264          → 手机 ✅
+#
+#   飞牛 App 的 Android WebView **不解 HEVC**（Chromium 只在设备/系统
+#   明确支持时才启用，很多 WebView 不启用）。这跟网络、反代、Host 都无关 ——
+#   实测该文件的 206 分片请求全部 200，字节完整送到。
+#
+#   ⇒ 唯一能让它「真的能播」的做法是**服务端转码成 H.264**。
+#
+# ★ 设计（务必保持"零成本透传"这条路）★
+#   · 探测不是 HEVC（H.264 / VP9 / AV1…）⇒ **302 跳到原来的下载流**
+#     ⇒ 行为、Range、性能与改动前**完全一致**，没有任何转码开销。
+#   · 探测到 HEVC ⇒ 用 ffmpeg 转 H.264 落盘缓存，之后直接发缓存文件。
+#   · 没装 ffmpeg / 转码失败 ⇒ 一样 302 回原流，前端会给出提示（不白屏）。
+#
+#   ⚠️ 转码参数里 `-pix_fmt yuv420p` 是**必须**的：浏览器只解 4:2:0 8bit，
+#      手机拍的 HEVC 常常是 10bit 或 4:2:2，不转就还是黑屏。
+#      `-movflags +faststart` 让 moov 前置，才能边下边播。
+# ===========================================================================
+_HEVC_TAGS = (b"hvc1", b"hev1", b"dvhe", b"dvh1")     # H.265 / HEVC（含 Dolby Vision）
+_H264_TAGS = (b"avc1", b"avc3")
+_VP9_TAGS = (b"vp09",)
+_AV1_TAGS = (b"av01",)
+
+# 编码探测结果的内存缓存：{(路径, mtime_ns, size): 'hevc'|...}
+# 为什么缓存：探测要读文件头尾各 1MB，而 <video> 播放期间会发**多个 Range 请求**，
+# 每次都读盘就白费了。key 含 mtime/size ⇒ 文件被替换后自动失效。
+_CODEC_CACHE: dict = {}
+_CODEC_CACHE_LOCK = threading.Lock()
+
+# 转码是 CPU 密集的，**同时只允许一个**（否则几个大文件一起转会打满 CPU）
+_TRANSCODE_SLOT = threading.Semaphore(1)
+_TRANSCODE_TIMEOUT = 60 * 30        # 单个文件最长转 30 分钟
+
+
+def _ffmpeg_exe() -> str | None:
+    if not _HAS_FFMPEG:
+        return None
+    try:
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+
+
+def _detect_vcodec(p: Path, st) -> str:
+    """探测视频轨编码。只读头尾各 1MB（moov 可能在前也可能在后）。
+
+    返回 'hevc' / 'h264' / 'vp9' / 'av1' / '?'（认不出）。
+    """
+    key = (str(p), st.st_mtime_ns, st.st_size)
+    with _CODEC_CACHE_LOCK:
+        hit = _CODEC_CACHE.get(key)
+    if hit:
+        return hit
+
+    chunk = 1 << 20
+    try:
+        with open(p, "rb") as f:
+            data = f.read(chunk)
+            if st.st_size > chunk:
+                f.seek(max(0, st.st_size - chunk))
+                data += f.read(chunk)
+    except OSError:
+        return "?"
+
+    codec = "?"
+    for tags, name in ((_HEVC_TAGS, "hevc"), (_H264_TAGS, "h264"),
+                       (_VP9_TAGS, "vp9"), (_AV1_TAGS, "av1")):
+        if any(t in data for t in tags):
+            codec = name
+            break
+
+    with _CODEC_CACHE_LOCK:
+        if len(_CODEC_CACHE) > 8192:      # 简单防膨胀
+            _CODEC_CACHE.clear()
+        _CODEC_CACHE[key] = codec
+    return codec
+
+
+def _transcode_h264(src: Path, dst: Path) -> None:
+    """把 src 转成「浏览器一定能播」的 H.264 MP4。**阻塞**，放线程池里跑。"""
+    exe = _ffmpeg_exe()
+    if not exe:
+        raise RuntimeError("ffmpeg 不可用")
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    with _TRANSCODE_SLOT:
+        if dst.is_file() and dst.stat().st_size > 0:
+            return                        # 别人刚转好
+        tmp = dst.with_name(dst.name + ".part")
+        cmd = [
+            exe, "-hide_banner", "-loglevel", "error", "-y",
+            "-i", str(src),
+            "-map", "0:v:0",              # 只取第一条视频轨（有的文件带封面图轨）
+            "-map", "0:a:0?",             # 有音频就带上，没有也不报错
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-pix_fmt", "yuv420p",        # ★ 必须：浏览器只解 4:2:0 8bit ★
+            "-profile:v", "high", "-level", "4.1",
+            "-c:a", "aac", "-b:a", "128k", "-ac", "2",
+            "-movflags", "+faststart",
+            "-f", "mp4", str(tmp),
+        ]
+        try:
+            r = subprocess.run(cmd, capture_output=True, timeout=_TRANSCODE_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise RuntimeError("转码超时")
+        if r.returncode != 0 or not tmp.is_file() or tmp.stat().st_size == 0:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise RuntimeError((r.stderr or b"").decode("utf-8", "replace")[:400])
+        tmp.replace(dst)                  # 原子替换，避免并发读到半截文件
+
+
+@router.get("/api/play")
+async def api_play(
+    mount: str, path: str,
+    user: dict = Depends(auth.current_user),
+):
+    m = _mount(user["username"], mount)
+    p = files.resolve(m, path)
+
+    def _passthrough() -> RedirectResponse:
+        """回退：跳到原来的下载流（支持 Range、零转码开销、= 改动前的行为）。"""
+        q = urlencode({"mount": mount, "path": path, "inline": "true"})
+        return RedirectResponse(url=f"/api/download?{q}", status_code=302)
+
+    try:
+        st = p.stat()
+        if not p.is_file():
+            raise OSError("not a file")
+    except OSError:
+        raise HTTPException(404, "文件不存在")
+
+    codec = await run_in_threadpool(_detect_vcodec, p, st)
+
+    # 不是 HEVC ⇒ 原样透传（H.264 本来就能播，别为它付转码成本）
+    if codec != "hevc":
+        return _passthrough()
+
+    if _ffmpeg_exe() is None:
+        return _passthrough()
+
+    key = hashlib.sha1(
+        f"{p}|{st.st_mtime_ns}|{st.st_size}".encode("utf-8", "replace")
+    ).hexdigest()[:32]
+    try:
+        dst = _cache_dir(_TRANSCODE_CACHE_DIR) / f"{key}.mp4"
+    except OSError:
+        return _passthrough()
+
+    if not (dst.is_file() and dst.stat().st_size > 0):
+        try:
+            await run_in_threadpool(_transcode_h264, p, dst)
+        except Exception:
+            # 转码失败（文件损坏 / 没有视频轨 / 超时）⇒ 还是给原流，
+            # 前端会展示「编码不支持」的提示和下载入口，不会白屏。
+            return _passthrough()
+
+    return FileResponse(
+        str(dst), media_type="video/mp4",
+        headers={"Cache-Control": "private, max-age=86400"},
+    )
 
 
 # ===== NB SEARCH (task21/task24) =====

@@ -81,6 +81,16 @@ class Settings:
     oo_url: str = ""
     oo_secret: str = ""
     oo_public: str = ""
+    # ★ OO 映射端口的「直连优化」（2026-10-03）★
+    #   非空（如 "8082"）时：若客户端是 http + IP/localhost 访问，
+    #   就让浏览器**直连 OO 的映射端口**，而不是走本应用的同源反代。
+    #   为什么必须这么做：同源反代是**单个 Python 进程**顶着 OO 编辑器
+    #   冷启动的 250+ 个请求，实测把"秒开"拖成 ~25s；
+    #   直连时这些请求由 OO 自己的 nginx 处理，秒回。
+    #   HTTPS / 域名访问时自动回退同源（直连端口通常没被映射出去，
+    #   且 https 页面加载 http 资源会被混合内容拦掉）。
+    #   留空 = 关闭该优化（退化为永远同源，兼容但慢）。
+    oo_direct_port: str = ""
     oo_enabled: bool = False
     # OnlyOffice 回调地址（OnlyOffice 容器访问本服务的地址）；空则复用 base_url
     oo_callback_url: str = ""
@@ -374,6 +384,8 @@ def _load_json_settings(s: Settings) -> bool:
         s.oo_secret = str(data["oo_secret"])
     if "oo_public" in data:
         s.oo_public = str(data["oo_public"]).rstrip("/")
+    if "oo_direct_port" in data:
+        s.oo_direct_port = str(data["oo_direct_port"]).strip()
     if "oo_callback_url" in data:
         s.oo_callback_url = str(data["oo_callback_url"]).rstrip("/")
     s.oo_enabled = bool(s.oo_url)
@@ -449,6 +461,7 @@ def save_settings_to_json() -> str:
         "oo_url": s.oo_url,
         "oo_secret": s.oo_secret,
         "oo_public": s.oo_public,
+        "oo_direct_port": s.oo_direct_port,
         "oo_callback_url": s.oo_callback_url,
         "preview_url": s.preview_url,
         "preview_public": s.preview_public,
@@ -516,6 +529,9 @@ def load_settings() -> Settings:
     env_oo_public = _env("NEBULA_OO_PUBLIC")
     if env_oo_public:
         s.oo_public = env_oo_public.rstrip("/")
+    env_oo_direct = _env("NEBULA_OO_DIRECT_PORT")
+    if env_oo_direct:
+        s.oo_direct_port = env_oo_direct.strip()
     env_oo_callback = _env("NEBULA_OO_CALLBACK_URL")
     if env_oo_callback:
         s.oo_callback_url = env_oo_callback.rstrip("/")

@@ -78,10 +78,11 @@ else
   fi
   # 断言 2：3 个服务各自一条 pull_policy: never
   NRUNPULL="$(grep -cE '^    pull_policy: never' "$RUN")"
-  [ "$NRUNPULL" -eq 3 ] || { bad "run.yml 的 pull_policy: never 数量异常：$NRUNPULL（应为 3）"; exit 1; }
+  # ★ 2026-10-04：KK 剥离成独立服务 ⇒ 4 个服务（nebula / kkfileview / onlyoffice / cad-viewer）★
+  [ "$NRUNPULL" -eq 4 ] || { bad "run.yml 的 pull_policy: never 数量异常：$NRUNPULL（应为 4）"; exit 1; }
   # 断言 3：服务形状没变（缩进 2 的服务名 + 紧跟其后的 image:）
   NRUNSVC="$(grep -cE '^    image:' "$RUN")"
-  [ "$NRUNSVC" -eq 3 ] || { bad "run.yml 的 image: 数量异常：$NRUNSVC（应为 3）"; exit 1; }
+  [ "$NRUNSVC" -eq 4 ] || { bad "run.yml 的 image: 数量异常：$NRUNSVC（应为 4）"; exit 1; }
   # 断言 4：镜像版本必须走 .env 占位（否则离线包换不了版本）
   grep -qE '^    image: nebula:\$\{NB_VERSION' "$RUN" \
     || { bad "run.yml 的 nebula 镜像没走 \${NB_VERSION} 占位"; exit 1; }
@@ -119,6 +120,16 @@ cp -f "$CDIR/_common.sh"             "$OUT/_common.sh"           && ok "_common.
 cp -f "$CDIR/install.sh"             "$OUT/install.sh"           && ok "install.sh"
 cp -f "$CDIR/diagnose-oo.sh"         "$OUT/diagnose-oo.sh"       && ok "diagnose-oo.sh"
 cp -f "$CDIR/gen-mounts.py"          "$OUT/gen-mounts.py"        && ok "gen-mounts.py（共享盘挂载生成器）"
+# ★ KK 的外置模板（2026-10-04）★
+#   KK 镜像保持官方源码原样，我们的定制走这个目录（compose 挂到 /opt/kk-templates）。
+#   漏进离线包的表现：zip / svg / STEP 预览变回 KK 默认页面（甚至 3D 直接打不开）。
+if [ -d "$CDIR/../nebula/kkfileview-templates/web" ]; then
+  mkdir -p "$OUT/kk-templates"
+  cp -f "$CDIR/../nebula/kkfileview-templates/web/"*.ftl "$OUT/kk-templates/" \
+    && ok "kk-templates/（KK 外置模板：$(ls "$OUT/kk-templates" | wc -l) 个）"
+else
+  bad "缺 nebula/kkfileview-templates/web —— zip/svg/3D 预览会退回 KK 默认页"; exit 1
+fi
 if [ -f "$CDIR/README.md" ]; then
   cp -f "$CDIR/README.md" "$OUT/安装说明.md" && ok "安装说明.md（← deploy/README.md）"
 else
@@ -156,7 +167,7 @@ ok "产物 compose 无 build: 段"
 # ★ 只数**真正的配置行** ★ 生成物头部注释里也提到了 pull_policy 这个词，
 #   用裸 grep 会把注释一起数进去（实测数出 5 处而不是 3 处，假红一次）。
 NPULL="$(grep -cE '^    pull_policy: never' "$OUT/docker-compose.yml")"
-[ "$NPULL" -eq 3 ] && ok "pull_policy: never × 3" || { bad "pull_policy 数量异常：$NPULL"; exit 1; }
+[ "$NPULL" -eq 4 ] && ok "pull_policy: never × 4" || { bad "pull_policy 数量异常：$NPULL"; exit 1; }
 NSVC="$(grep -cE '^  [a-z-]+:$' "$OUT/docker-compose.yml")"
 info "产物里「缩进 2 的顶层条目」数：$NSVC（含 networks/volumes 的子项，仅供参考）"
 
@@ -194,6 +205,9 @@ if [ "$DO_SAVE" = "1" ]; then
   OUT_FOR_DOCKER="$OUT"
   case "$DK" in *wsl*) OUT_FOR_DOCKER="$(printf '%s' "$OUT" | sed -E 's#^([A-Za-z]):#/mnt/\l\1#')" ;; esac
   save_one "nebula:$VER" "$OUT_FOR_DOCKER/nebula-$VER.tar"
+  # ★ KK 独立镜像（2026-10-04）★ 它不再被 nebula 镜像包含，必须单独给
+  KK_VER="$(env_get "$CDIR/.env.example" NB_KK_VERSION)"; KK_VER="${KK_VER:-5.0.2}"
+  save_one "kkfileview:$KK_VER" "$OUT_FOR_DOCKER/nebula-kkfileview-$KK_VER.tar"
   save_one "nebula/cad-viewer:$CAD_VER" "$OUT_FOR_DOCKER/nebula-cad-viewer-$CAD_VER.tar"
 fi
 

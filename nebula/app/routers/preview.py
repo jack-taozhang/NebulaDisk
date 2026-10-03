@@ -200,6 +200,69 @@ async def proxy_preview(rest: str, request: Request):
         content = content.replace(b"__SERVER_BASE_URL__", internal.encode())
         out_headers.pop("content-length", None)
 
+    # ★★★ 把「容器内地址」换成「浏览器可达地址」（2026-10-03）★★★
+    #
+    #   症状：mp4 在手机和电脑上都打不开（一直转圈）。
+    #   定位：直接取 KK 渲染出来的页面看，`video.ftl` 把**我们传进去的 url**
+    #         原样写给了 ckplayer：
+    #             video: 'http://nebula:8088/api/raw/xxx.mp4?mount=…&sig=…'
+    #         `nebula` 是 docker 内部服务名 —— **浏览器解析不了** ⇒ 视频永远加载不出来。
+    #
+    #   为什么已有的 X-Base-Url 挡不住：
+    #     X-Base-Url 只影响模板里用 `${baseUrl}` 拼的「静态资源 / iframe 地址」，
+    #     而 video 这条是模板**直接内联**的文件地址，跟 baseUrl 无关。
+    #
+    #   ⇒ 只能在响应体上做替换：把 internal origin（http://nebula:8088）
+    #     换成本次请求的**浏览器源**（_origin(request)，含网关端口）。
+    #     替换后是 `https://<网关>:<端口>/api/raw/…` ⇒ 与页面同源 ⇒ 直接可取流；
+    #     `/api/raw` 实测支持 Range（206 + Content-Range，`video/mp4`），拖动进度也正常。
+    #
+    #   ⚠️ 不会误伤「压缩包成员」那条服务端回拉：它用的是 __SERVER_BASE_URL__
+    #      占位符，值是 127.0.0.1:8012，与这里替换的 nebula:8088 无关。
+    #   ⚠️ 只替换明文形式（KK 的 video 模板就是这么写的）；不做 base64/百分号
+    #      编码形式的替换 —— 那些是给我们自己 / KK 服务端用的，浏览器不直接取。
+    #
+    #   ★★★ 例外：3D 预览（online3D.ftl）**绝不能**替换（2026-10-03）★★★
+    #
+    #     kkFileView 的 3D 预览（Online 3D Viewer）**不是**由浏览器直接取模型，
+    #     而是走它自己的 `getCorsFile` 代理：
+    #
+    #         iframe.src = …/website/index.html#model=<base>/getCorsFile?urlPath=<B64(rawUrl)>
+    #         浏览器 → /preview/getCorsFile?urlPath=…  （同源）
+    #         服务端 → 解码 B64 → 去拉 rawUrl        ← 这一步是 **kkFileView 服务端**做的
+    #
+    #     也就是说 rawUrl 只有 **kkFileView 容器自己**会去访问，浏览器永远不碰它。
+    #     用内部地址（http://nebula:8088）反而**两全其美**：
+    #
+    #       ① **不被白名单拦**：KK 有防 SSRF 的 `trust.host` 白名单
+    #          （本机实测 KK_TRUST_HOST=`nebula,127.0.0.1,localhost`）。
+    #          内部地址的 host 正是 `nebula` ⇒ 放行；
+    #          而一旦替换成浏览器域名（如 disk.plumaple.dpdns.org），
+    #          会被判「预览源文件来自不受信任的站点」→ **403** →
+    #          o3dv 在浏览器里表现为
+    #            「Something went wrong / Failed to load file for import.
+    #              The remote server refused to fulfill the request.
+    #              … make sure that CORS requests are allowed on the remote server.」
+    #          （**症状像 CORS，实际是 403 白名单**，极易误诊 —— 这次就绕了半天。）
+    #       ② **更快**：容器内直达应用，不走公网/隧道。
+    #          实测同一个 3.2MB 的 .stp：走公网 rawUrl 用了 **47s**；
+    #          走内部地址几乎瞬时。
+    #
+    #     ⇒ 判据：响应体里出现 getCorsFile / website/index.html / o3dv
+    #        就说明这是 3D 预览页，跳过替换。
+    #     （其余模板 —— video / audio / pdf / picture —— 仍然是浏览器直取，
+    #       必须替换成浏览器地址，保持原行为。）
+    _is_3d_page = (
+        b"getCorsFile" in content
+        or b"website/index.html" in content
+        or b"o3dv" in content
+    )
+    if media_type and "html" in media_type.lower() and not _is_3d_page:
+        _internal = _internal_origin().rstrip("/")
+        if _internal and _internal.encode() in content:
+            content = content.replace(_internal.encode(), origin.encode())
+            out_headers.pop("content-length", None)
+
     # ★★★ 曾在这里做过「压缩包成员 404 自愈」，2026-09-20 已整体移除 ★★★
     #
     #   背景：kkFileView 的 CompressFilePreviewImpl 用**进程内缓存**（cache.type=jdk）

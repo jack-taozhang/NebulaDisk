@@ -30,7 +30,8 @@ from __future__ import annotations
 
 import json
 import sys
-from urllib.parse import quote, urlencode
+import ipaddress
+from urllib.parse import quote, urlencode, urlsplit
 
 import httpx
 
@@ -108,6 +109,7 @@ def build_editor_config(
     user_name: str,
     lang: str = "zh-CN",
     embed: bool = False,
+    editor_type: str = "desktop",   # ★ desktop | mobile（移动端布局，2026-10-03）
 ) -> dict:
     """生成 OnlyOffice DocsAPI config 对象（含 token）。
 
@@ -190,6 +192,27 @@ def build_editor_config(
         # type 是 config 顶层键（与 documentType 平级），必须在签名前、
         # cfg 建好之后设置 —— 见上方 embed 分支注释（embedded=官方无工具栏查看器）。
         cfg["type"] = "embedded"
+    else:
+        # ★★ 移动端用 `mobile` 布局（2026-10-03）★★
+        #
+        #  背景：手机（飞牛 App 的 webview）打开 Office 文件，OnlyOffice 弹
+        #        「下载失败」，而电脑完全正常。日志上的现象是：
+        #          手机把编辑器 UI 的 378 个资源全下来了、WS 也通了（~2KB 下行），
+        #          **但从不请求文档数据**（`/cache/files/**/Editor.bin` 0 条，
+        #          同期电脑 8 条）⇒ 编辑器拿不到文档 ⇒ 报 -4「下载失败」。
+        #        OO 服务端侧一切正常（`/api/oo/callback` 一直 status=1「文档已打开」）。
+        #
+        #  这里不设 type 时，OO 默认按 **desktop** 装配编辑器 —— 那套 UI 是给
+        #  大屏 + 鼠标设计的（完整工具栏 / 状态栏 / 右键菜单 / 大量 DOM），
+        #  在手机 webview 里初始化路径不同、开销也大。
+        #  改成官方支持的 `mobile`（api.js 会加载移动端布局）就是为了让手机
+        #  走它自己的那条初始化路径，把"不请求文档"这一步带过去。
+        #
+        #  ⚠️ 必须在 `_sign(cfg)` **之前**设置：token 覆盖整份 config，
+        #     签名后再动任何字段 OO 都会拒（见上面 customization 的注释）。
+        #  ⚠️ embed 分支优先：嵌入块（思源插件）走的仍是 embedded，
+        #     不受移动端判定影响。
+        cfg["type"] = editor_type
 
     if settings.oo_secret:
         cfg["token"] = _sign(cfg)
@@ -247,8 +270,66 @@ async def fetch_edited(url: str, dest_path: str) -> int:
 
 
 def oo_public_base(request_origin: str) -> str:
-    """OnlyOffice 容器里用的地址（浏览器加载 api.js 用）。"""
-    return settings.oo_public or (settings.oo_url or "") or request_origin
+    """浏览器加载 api.js 用的地址（**必须浏览器可达**）。
+
+    ★ 2026-10-03 修掉回退次序 bug ★
+      原实现：`return settings.oo_public or (settings.oo_url or "") or request_origin`
+
+      `oo_url` 是**容器内**地址（如 http://onlyoffice:80），浏览器永远不可达。
+      它在链上 ⇒ `oo_public` 一旦留空，算出来就是那个容器内名，必然加载失败；
+      而 `request_origin`（本该是最正确的**同源**选项）**永远轮不到**。
+
+      改成 `oo_public or request_origin`：
+        · oo_public 留空 ⇒ 自动同源（配合 routers/onlyoffice.py 里的根级反代，
+          api.js 变成 {当前访问源}/web-apps/... ，HTTP/HTTPS、任意地址都成立）
+        · 想指定绝对地址（老行为）⇒ 照旧在设置里填 oo_public
+
+    ★ 2026-10-03 追加：**直连优先**（性能回退修复）★
+      背景：把 `oo_public` 清空改成"永远同源"之后，OO 编辑器冷启动那 250+ 个请求
+      全部落到本应用这个**单进程 Python 反代**上，实测把原来的"秒开"拖成 ~25s。
+      （OO 原生 nginx 处理这些请求是毫秒级的，Python 追不上。）
+
+      所以回退链改成三级：
+        ① `settings.oo_public` 显式配了 ⇒ 用它（老行为，最高优先级）
+        ② 能推出**浏览器可直连**的 OO 地址 ⇒ 用它（快，见 _oo_direct_origin）
+        ③ 都不行 ⇒ 同源（走自己的反代；慢但 HTTP/HTTPS/任意地址都能用）
+    """
+    if settings.oo_public:
+        return settings.oo_public
+    return _oo_direct_origin(request_origin) or request_origin
+
+
+def _oo_direct_origin(request_origin: str) -> str:
+    """由"当前访问源"推一个**浏览器能直连**的 OO 地址；推不出就返回 ""。
+
+    成立条件（**必须全满足**，缺一不可 —— 推错会让编辑器直接白屏）：
+      · 配了 `settings.oo_direct_port`（空 = 关闭该优化）
+      · 访问是 **http**：https 页面去加载 http 资源会被"混合内容"拦掉
+      · host 是 **IP 字面量或 localhost**：域名的情况无法假定 :<port> 也被
+        映射到 OO 上（FN Connect 之类就是这样）⇒ 宁可慢，也不能把地址指向不存在的地方
+      · 端口不能等于当前访问端口（否则等于把自己指回自己，成环）
+    """
+    port = (settings.oo_direct_port or "").strip()
+    if not port:
+        return ""
+    try:
+        sp = urlsplit(request_origin)
+    except ValueError:
+        return ""
+    if sp.scheme != "http" or not sp.hostname:
+        return ""
+    host = sp.hostname
+    if host.lower() != "localhost":
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            return ""      # 是域名 ⇒ 不敢假定端口被映射，回退同源
+    try:
+        if sp.port == int(port):
+            return ""
+    except ValueError:
+        return ""
+    return f"http://{host}:{port}"
 
 
 def oo_internal_base() -> str:

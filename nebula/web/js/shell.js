@@ -2114,6 +2114,179 @@ const Dialog = (() => {
 
 
 /* ==========================================================================
+   剪贴板
+
+   ★ 2026-10-04 用户报障 ★
+     「网盘 链接关联窗口，目前点击条目上面的复制按钮，没有办法复制到剪贴板，
+       要求手动复制，不方便。」
+
+   排查结论（读代码 + 真机环境推断，不是猜）：旧写法只有 `navigator.clipboard`
+   一条路，而这套页面实际跑在三种「它不灵」的环境里：
+     ① **http:// 内网直连**（`http://172.16.30.128:8089`）—— 非安全上下文里
+        `navigator.clipboard` **是 `undefined`**。旧代码直接 `navigator.clipboard
+        .writeText(text)` ⇒ 取 `.writeText` 时**同步抛 TypeError**，
+        后面的 `.catch()` **根本接不到** ⇒ 按钮点了**一声不响**，什么也不发生。
+     ② **手机 App 内置 WebView**（飞牛 App）—— `writeText` 存在但会被拒
+        （`NotAllowedError` / `Document is not focused` / iframe 权限策略），
+        旧代码只弹一句「请手动复制」就把锅甩给用户。
+     ③ 桌面浏览器里页面失焦时，`writeText` 也会拒。
+
+   ⇒ 统一收敛到这里，三条路径**依次降级，任一条成功即成功**：
+     ① `navigator.clipboard.writeText` —— HTTPS + 权限齐全时最干净（不闪选区）
+     ② 临时 `<textarea>` + `document.execCommand('copy')` —— **同步**执行，
+        保留用户手势；http:// 与多数 App WebView 只有这条路能过
+     ③ `contenteditable` + Range 选中 + execCommand —— ②在个别 WebView 上
+        对 textarea 无效时的第二发
+     三条全灭才弹「手动复制」框（**已经全选好**，桌面 Ctrl+C / 手机长按即复制），
+     并在框里给一个「再试一次」。
+
+   ⚠️ ②③ 必须在**同一个用户手势**里同步跑完：中间只要 `await` 过，手势就过期，
+      execCommand 会静默返回 false。所以同步路径不掺任何异步操作。
+   ========================================================================== */
+const Clipboard = (() => {
+
+  /** 异步剪贴板可用吗 —— 三个条件缺一不可（安全上下文 + API 在 + 在顶层/同源 iframe） */
+  function hasAsync() {
+    try {
+      return !!(window.isSecureContext
+        && navigator.clipboard
+        && typeof navigator.clipboard.writeText === 'function');
+    } catch (_) { return false; }
+  }
+
+  /**
+   * 老办法：临时 textarea + execCommand('copy')。
+   * ⚠️ 必须**同步**调用（用户手势里），且必须真的 focus + select：
+   *    iOS / 安卓 WebView 都要求被复制的节点**真的处于选中态**。
+   * 样式用小透明固定定位 —— 不能用 `display:none` / `visibility:hidden`
+   *    （那样元素不可选中，execCommand 直接失败），也不能让它撑出滚动条。
+   */
+  function legacyTextarea(text) {
+    let ta = null;
+    const sel = document.getSelection();
+    let saved = null;
+    try {
+      if (sel && sel.rangeCount) saved = sel.getRangeAt(0).cloneRange();
+      ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');   // 只读：手机上不弹键盘
+      ta.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;'
+        + 'padding:0;border:0;outline:0;box-shadow:none;background:transparent;'
+        + 'opacity:0;z-index:-1;';
+      document.body.appendChild(ta);
+      ta.focus({ preventScroll: true });
+      ta.select();
+      try { ta.setSelectionRange(0, ta.value.length); } catch (_) { /* 个别 WebView 不支持 */ }
+      return !!document.execCommand('copy');
+    } catch (_) {
+      return false;
+    } finally {
+      if (ta && ta.parentNode) ta.parentNode.removeChild(ta);
+      // 复制完把用户原来的选区还回去（否则观感像"选中状态莫名没了"）
+      if (sel && saved) { try { sel.removeAllRanges(); sel.addRange(saved); } catch (_) {} }
+    }
+  }
+
+  /** 第二发：contenteditable + Range（textarea 那条路在个别 WebView 上无效） */
+  function legacyRange(text) {
+    let box = null;
+    try {
+      box = document.createElement('div');
+      box.textContent = text;
+      box.setAttribute('contenteditable', 'true');
+      box.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;'
+        + 'overflow:hidden;opacity:0;z-index:-1;';
+      document.body.appendChild(box);
+      const r = document.createRange();
+      r.selectNodeContents(box);
+      const sel = document.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(r);
+      box.focus({ preventScroll: true });
+      return !!document.execCommand('copy');
+    } catch (_) {
+      return false;
+    } finally {
+      if (box && box.parentNode) box.parentNode.removeChild(box);
+    }
+  }
+
+  /** 同步兜底：② → ③。只在用户手势里调用。 */
+  function legacy(text) {
+    return legacyTextarea(text) || legacyRange(text);
+  }
+
+  /**
+   * 复制到剪贴板。返回 `Promise<boolean>`（true = 真的进剪贴板了）。
+   * 没写 Clipboard API 的浏览器/WebView 也**不会抛异常** —— 调用方只判返回值。
+   */
+  function copy(text) {
+    const t = String(text == null ? '' : text);
+    if (!hasAsync()) {
+      // 非安全上下文（http://）：没有异步 API 可用，直接走同步兜底
+      return Promise.resolve(legacy(t));
+    }
+    return Promise.resolve(navigator.clipboard.writeText(t)).then(
+      () => true,
+      // 被拒（权限 / 失焦 / iframe 权限策略）→ 立刻退回同步兜底。
+      // ⚠️ 这里不要再 await 别的东西，手势还热着。
+      () => legacy(t),
+    );
+  }
+
+  /**
+   * 最后兜底：弹一个**已经全选好**的框。
+   * 桌面 Ctrl+C / 手机长按「复制」即可；还带一个「再试一次」。
+   */
+  function showManual(text) {
+    let d = null;
+    try {
+      d = Dialog.custom({ title: '手动复制' });
+    } catch (_) {
+      return false;   // 连弹窗都建不出来（极端情况）—— 静默放弃，别把异常往外抛
+    }
+    d.el.innerHTML = `
+      <div class="share-hint" style="margin-bottom:10px">
+        当前环境（App 内置浏览器 / 非 HTTPS 页面）不允许网页直接写剪贴板。
+        下面这段**已经全选**：桌面按 <b>Ctrl+C</b>，手机<b>长按选中的文字</b>点「复制」。
+      </div>
+      <textarea data-role="manual" rows="3" readonly
+        style="width:100%;box-sizing:border-box;resize:vertical;
+               font:12px/1.5 ui-monospace,Consolas,monospace">${esc(text)}</textarea>`;
+    d.foot.innerHTML = `
+      <button class="btn" data-role="retry" style="margin-right:auto">再试一次</button>
+      <button class="btn primary" data-role="ok">关闭</button>`;
+    const ta = d.el.querySelector('[data-role="manual"]');
+    // 打开即全选：用户什么都不用做，直接 Ctrl+C / 长按
+    setTimeout(() => { try { ta.focus(); ta.select(); } catch (_) {} }, 60);
+    d.foot.querySelector('[data-role="ok"]').onclick = () => d.close();
+    d.foot.querySelector('[data-role="retry"]').onclick = () => {
+      if (legacy(text)) { d.close(); Toast.ok('已复制', text); }
+      else Toast.info('还是不行', '请按住上面的文字全选后复制');
+    };
+    return true;
+  }
+
+  return { copy, legacy, hasAsync, showManual };
+})();
+
+/**
+ * 复制 + 统一提示 —— 全站入口，**别在各处再写一份 `navigator.clipboard`**。
+ * @param {string} text  要复制的文本
+ * @param {string} [label] Toast 的副标题（默认直接显示文本本身）
+ * @returns {Promise<boolean>}
+ */
+function copyText(text, label) {
+  const t = String(text == null ? '' : text);
+  return Clipboard.copy(t).then((ok) => {
+    if (ok) { Toast.ok('已复制', label || t); return true; }
+    Clipboard.showManual(t);
+    return false;
+  });
+}
+
+
+/* ==========================================================================
    通用小工具
    ========================================================================== */
 /** HTML 转义 —— 所有插进 innerHTML 的用户数据都必须过这一层 */

@@ -1,7 +1,23 @@
 # NebulaDisk 部署指南
 
-仿 Windows 界面的云盘，与 kkFileView 合并为**单个镜像**，Office 文件调用独立部署的
-OnlyOffice 官方镜像进行在线编辑。
+仿 Windows 界面的云盘，**自带前门 nginx**（反代），Office 文件调用独立部署的
+OnlyOffice 官方镜像在线编辑，其余格式交给**独立容器** kkFileView 只读预览。
+
+> ### ★ 2026-10-04 架构变更（1.2.7）★ 读本文前先看这段
+> · **kkFileView 已从本镜像剥离**（以前是 `FROM kkfileview:5.0.2` 同体双进程）：
+>   本镜像不再含 JRE / LibreOffice / 中日韩字体 ⇒ 体积 2.78GB → **约 0.7GB**。
+>   KK 变成独立服务 `kkfileview:<ver>`，应用用
+>   `NEBULA_PREVIEW=http://kkfileview:8012` **走网络**访问它。
+> · **前门 nginx 并进本镜像**（以前是独立容器 nebula-front + 宿主目录绑定挂载）：
+>   容器内由 supervisord 管 nginx(80) + 应用(8088) 两个进程。
+>   理由见 `nebula/nginx/nebula-front.conf` 顶部：那份 conf 与应用的取值方式是一对，
+>   分开存放必然漂移。
+> · KK 镜像保持**官方源码原样**；我们那 3 个定制模板改走**外置模板目录**
+>   （`nebula/kkfileview-templates/web/` → 容器内 `/opt/kk-templates/web/`，
+>   用 `SPRING_FREEMARKER_TEMPLATE_LOADER_PATH` 让 `file:` 优先、classpath 兜底）。
+>
+> 下文凡提到「KK 在本镜像内 / 8012 端口在本容器」的段落均为**变更前**的描述，
+> 权威说明以 `deploy/README.md`（部署指南）与 `deploy/docker-compose.yml` 为准。
 
 ---
 
@@ -11,8 +27,11 @@ OnlyOffice 官方镜像进行在线编辑。
 
 | 进程 | 端口 | 职责 |
 |---|---|---|
-| kkFileView | 8012 | 非 Office 文件预览（PDF、图片、视频、压缩包、CAD、代码等） |
+| nginx（前门） | 80 | 反代：OO 静态资源/WS/缓存、静态资源缓存头、Host 协议修正 |
 | NebulaDisk | 8088 | 仿 Windows 云盘界面、目录映射、多用户鉴权、文件管理 |
+
+kkFileView 自 2026-10-04 起是**独立容器**（`kkfileview:8012`），由应用经
+`NEBULA_PREVIEW` 访问；**不在本镜像里**。
 
 **OnlyOffice 不在这个镜像里**，它作为独立容器运行。原因见
 「[为什么 OnlyOffice 不合并进来](#4-为什么-onlyoffice-不合并进来)」。
@@ -44,10 +63,11 @@ OnlyOffice 官方镜像进行在线编辑。
 ## 2. 前置条件
 
 1. **Docker 与 Docker Compose**（NAS 上通常已装）
-2. **基础镜像 `kkfileview:5.0.2`** 必须已在本地存在
+2. **基础镜像 `ubuntu:24.04`**（本镜像的底包）必须可获取；
+   另外 **`kkfileview:5.0.2`**（KK 独立服务用）必须在本地存在：
    ```bash
    docker images kkfileview
-   # 没有的话，先在仓库根目录执行 ./build.sh
+   # 没有的话，先在仓库根目录执行 ./build.sh（官方源码，零定制）
    ```
 3. **OnlyOffice 容器已在运行**
    ```bash

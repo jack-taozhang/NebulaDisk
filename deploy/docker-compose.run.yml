@@ -76,25 +76,27 @@ services:
   # 云盘 + kkFileView（同一镜像里的两个进程，supervisord 编排）
   # ===========================================================================
   nebula:
-    image: nebula:${NB_VERSION:-1.2.6}
+    image: nebula:${NB_VERSION:-1.2.7}
     pull_policy: never          # 只用本地已导入的镜像
     <<: *common
     # 容器名必须与 NEBULA_BASE_URL 里的主机名一致（http://nebula:8088）
     container_name: nebula
 
     ports:
-      # 左边宿主机端口（可改），右边固定 8088
-      - "${NB_HOST_PORT:-8089}:8088"
-      # kkFileView 直连端口（排查用）。需要就把下面这行取消注释。
-      # - "${NB_KK_HOST_PORT:-8012}:8012"
+      # 左边宿主机端口（可改）；右边固定 **80** —— 2026-10-04 起反代 nginx
+      # 并进了本镜像，容器内由它监听 80，应用退到 8088（仅本机可达）。
+      - "${NB_HOST_PORT:-8089}:80"
+      # 应用直连端口（**仅排查用**，绕过前门；不需要可注释掉）
+      - "${NB_APP_HOST_PORT:-8088}:8088"
 
     volumes:
       # 云盘数据：SQLite 用户库 + 会话密钥。**必须持久化**，否则重建容器就丢用户。
       #   ⚠️ 目标 /var/lib/nebula 是产品固定值（同 Dockerfile 的 NEBULA_DATA_DIR）
       - ${NB_DATA_DIR:-./data}:/var/lib/nebula
-      # kkFileView 的转换产物与日志（纯缓存，可随时删；删后要重启容器）
-      - ${NB_KK_FILE_DIR:-./data-kk/file}:/opt/kkFileView-5.0.2/file
-      - ${NB_KK_LOG_DIR:-./data-kk/log}:/opt/kkFileView-5.0.2/log
+      # 前门 nginx 的 proxy_cache 落盘（OnlyOffice 静态资源）。
+      #   命名卷：跨容器重建存活，小文件也比 bind mount 快。
+      #   清缓存：docker exec nebula rm -rf /var/cache/nginx/oo/*
+      - nebula-nginx-cache:/var/cache/nginx
 
       # ★ 共享盘**不在这里** ★
       #   它们由 docker-compose.mounts.yml 提供（叠加在本文件之后）。
@@ -123,13 +125,72 @@ services:
       NEBULA_OO_SECRET: ${NB_OO_SECRET:-}
       # 留空则该格式自动降级给 kkFileView
       NEBULA_CAD_URL: ${NB_CAD_URL:-http://cad-viewer:8080}
+      # ★ KK 自 2026-10-04 起是**独立容器** ⇒ 必须用服务名，loopback 走不通 ★
+      NEBULA_PREVIEW: ${NB_PREVIEW_URL:-http://kkfileview:8012}
+      NEBULA_PREVIEW_PUBLIC: ${NB_PREVIEW_PUBLIC:-/preview}
 
       # ---- 可选微调 ----
       NEBULA_TITLE: ${NB_TITLE:-NebulaDisk}
       NEBULA_LOG_LEVEL: ${NB_LOG_LEVEL:-info}
       NEBULA_SESSION_HOURS: ${NB_SESSION_HOURS:-12}
       NEBULA_MAX_UPLOAD_MB: ${NB_MAX_UPLOAD_MB:-2048}
+
+    deploy:
+      resources:
+        # 应用 + 前门 nginx 很轻（几十 MB 级）；KK 的内存另算在 kkfileview 服务上
+        limits:
+          memory: ${NB_MEMORY_LIMIT:-1g}
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8088/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 90s
+      retries: 5
+
+  # ===========================================================================
+  # kkFileView（独立容器；官方源码自建镜像，**零定制**）
+  #
+  #   ★ 2026-10-04 从 nebula 镜像里剥离出来 ★
+  #     那层（JRE21 + LibreOffice + 中日韩字体）2.05GB，与云盘本体无关，
+  #     却让「改一行前端也要重建 2GB 层」。
+  #   镜像来源：仓库根 Dockerfile + build.sh（**用代码直接生成**，官方源码原样）。
+  #   我们的模板定制走**外置模板目录**，镜像本身不动：
+  #     SPRING_FREEMARKER_TEMPLATE_LOADER_PATH=file:/opt/kk-templates/web/,classpath:/web/
+  #     ⇒ file: 先命中我们目录里的同名模板，其余回落 jar 内。
+  #   ⚠️ 顺序不能反（反了 classpath 先命中 ⇒ 我们的覆盖一点不生效）。
+  # ===========================================================================
+  kkfileview:
+    image: kkfileview:${NB_KK_VERSION:-5.0.2}
+    pull_policy: never          # 只用本地已导入的镜像
+    <<: *common
+    # 容器名要与 NEBULA_PREVIEW 的主机名一致（http://kkfileview:8012）
+    container_name: kkfileview
+
+    ports:
+      - "${NB_KK_HOST_PORT:-8013}:8012"
+
+    volumes:
+      # 转换产物与日志（纯缓存，可随时删；删后要重启容器）
+      - ${NB_KK_FILE_DIR:-./data-kk/file}:/opt/kkFileView-5.0.2/file
+      - ${NB_KK_LOG_DIR:-./data-kk/log}:/opt/kkFileView-5.0.2/log
+      # ★ 我们的模板定制（只读挂载）—— KK 镜像零改动，定制在网盘这一侧 ★
+      - ./kk-templates:/opt/kk-templates:ro
+
+    environment:
+      <<: *tzenv
+      SPRING_FREEMARKER_TEMPLATE_LOADER_PATH: ${NB_KK_TEMPLATE_PATH:-file:/opt/kk-templates/web/,classpath:/web/}
       JAVA_OPTS: ${NB_JAVA_OPTS:--XX:MaxRAMPercentage=45.0 -XX:+ExitOnOutOfMemoryError}
+      # ★ 列真实 host，不要写 "*" ★ 4.1.0 的 TrustHostFilter 不支持通配，
+      #   写 "*" 会让所有预览被判"不受信任"（notTrustHost 页 + sorry.jpg）。
+      #   nebula 必须在列：KK 要回拉应用签发的 raw 直链（http://nebula:8088/...）。
+      KK_TRUST_HOST: ${NB_KK_TRUST_HOST:-nebula,kkfileview,127.0.0.1,localhost}
+      KK_BASE_URL: default
+      KK_CACHE_TYPE: jdk
+      KK_OFFICE_PREVIEW_TYPE: pdf
+      KK_OFFICE_QUALITY: "80"
+      OFFICE_PLUGIN_SERVER_PORTS: "2001"
+      KK_DELETE_PASSWORD: "false"
 
     # LibreOffice 无头转换用 /dev/shm；Docker 默认 64MB 会让 soffice 被 SIGABRT 杀掉
     shm_size: ${NB_SHM_SIZE:-2gb}
@@ -142,7 +203,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: ${NB_MEMORY_LIMIT:-4g}
+          memory: ${NB_KK_MEMORY_LIMIT:-4g}
 
     ulimits:
       nofile:
@@ -150,10 +211,10 @@ services:
         hard: 65535
 
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8088/healthz || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8012/ || exit 1"]
       interval: 30s
       timeout: 5s
-      start_period: 90s
+      start_period: 120s
       retries: 5
 
   # ===========================================================================
@@ -229,6 +290,9 @@ services:
 #     不会像宿主目录那样把 ds(101:102) 盖成 root:root。
 # -----------------------------------------------------------------------------
 volumes:
+  # 前门 nginx 的 proxy_cache（显式 name 以复用既有卷，换编排不丢缓存）
+  nebula-nginx-cache:
+    name: nebula-nginx-cache
   oo-data:
   oo-logs:
   oo-lib:

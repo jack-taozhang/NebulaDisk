@@ -86,23 +86,26 @@ services:
   # NebulaDisk —— 云盘 + kkFileView（单镜像双进程）
   # ---------------------------------------------------------------------------
   nebula:
-    image: nebula:1.2.6
+    image: nebula:1.2.7
     pull_policy: never          # 只用本地已导入的镜像，绝不联网拉取
     container_name: nebula
     restart: unless-stopped
 
     ports:
-      # 云盘界面。宿主机端口 8089，容器内固定 8088。
-      - "8089:8088"
-      # kkFileView 独立端口（排查用）。不需要可注释掉。
-      - "8012:8012"
+      # ★ 前门 nginx 在容器内监听 80（2026-10-04 起反代并进本镜像）★
+      #   用户访问入口仍是宿主机 8089。
+      - "${NB_HOST_PORT:-8089}:80"
+      # 应用直连端口（**仅排查用**，绕过前门；不需要可注释掉）。
+      - "8088:8088"
 
     volumes:
       # 云盘数据（SQLite 用户库 + 会话密钥，必须持久化）
-      - ./data:/var/lib/nebula
-      # kkFileView 的转换产物与日志（纯缓存，可随时删，删后需重启容器）
-      - ./data-kk/file:/opt/kkFileView-5.0.2/file
-      - ./data-kk/log:/opt/kkFileView-5.0.2/log
+      - ${NB_DATA_DIR:-./data}:/var/lib/nebula
+      # ★ 前门 nginx 的 proxy_cache 落盘（OnlyOffice 的静态资源）★
+      #   命名卷：跨容器重建存活（实测 docker restart 后仍 HIT），
+      #   而且小文件放命名卷比 bind mount 快得多。
+      #   清缓存：docker exec nebula rm -rf /var/cache/nginx/oo/*
+      - nebula-nginx-cache:/var/cache/nginx
 
       # ===== 真实目录映射 =====
       # 左边宿主机路径 : 右边容器内路径
@@ -140,8 +143,9 @@ services:
       # 留空 = 自动生成到 /var/lib/nebula/secret.key（持久卷，重启不掉线）
       NEBULA_JWT_SECRET: ""
 
-      # ---------------- kkFileView（同镜像内的另一个进程）----------------
-      NEBULA_PREVIEW: "http://127.0.0.1:8012"
+      # ---------------- kkFileView（已是**独立容器**）----------------
+      # ★ 2026-10-04 起必须用服务名：KK 不再与应用同容器，loopback 走不通 ★
+      NEBULA_PREVIEW: "http://kkfileview:8012"
       NEBULA_PREVIEW_PUBLIC: "/preview"
 
       # ---------------- OnlyOffice（本编排内置服务）----------------
@@ -157,11 +161,70 @@ services:
       NEBULA_CAD_URL: "http://cad-viewer:8080"
       NEBULA_CAD_PROBE: "http://cad-viewer:8080"
 
-      # ---------------- kkFileView 自身参数 ----------------
+    deploy:
+      resources:
+        # 应用 + 前门 nginx 都很轻（几十 MB 级）；KK 的内存另算在 kkfileview 服务上。
+        limits:
+          memory: 1g
+
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8088/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 90s
+      retries: 5
+
+    networks:
+      - nebula-net
+
+  # ---------------------------------------------------------------------------
+  # kkFileView（独立容器）
+  #
+  #   ★ 2026-10-04 从 nebula 镜像里剥离出来 ★
+  #     它那层（JRE21 + LibreOffice + 中日韩字体）是 2.05GB，与云盘本体无关，
+  #     却让「改一行前端也要重建 2GB 层」。剥离后 nebula 镜像只剩约 0.7GB。
+  #   镜像来源：**官方源码自建**（仓库根 Dockerfile + build.sh），零定制。
+  #   我们的模板定制走**外置模板目录**（见下面 SPRING_FREEMARKER_TEMPLATE_LOADER_PATH）：
+  #     官方 KK 不认识我们的页面，就用 file: 优先、classpath 兜底的加载顺序，
+  #     把 kk-templates/web/*.ftl 覆盖到同名模板上 —— **KK 镜像不动**。
+  # ---------------------------------------------------------------------------
+  kkfileview:
+    image: kkfileview:5.0.2
+    pull_policy: never          # 只用本地已导入的镜像，绝不联网拉取
+    container_name: kkfileview
+    hostname: kkfileview
+    restart: unless-stopped
+
+    ports:
+      # 直连端口（排查用）。不需要可整段注释。
+      - "${NB_KK_HOST_PORT:-8013}:8012"
+
+    volumes:
+      # 转换产物与日志（纯缓存，可随时删，删后需重启容器）
+      - ${NB_KK_FILE_DIR:-./data-kk/file}:/opt/kkFileView-5.0.2/file
+      - ${NB_KK_LOG_DIR:-./data-kk/log}:/opt/kkFileView-5.0.2/log
+      # ★ 我们的模板定制（只读挂进容器，KK 镜像本身零改动）★
+      - ./kk-templates:/opt/kk-templates:ro
+
+    environment:
+      TZ: "Asia/Shanghai"
+
+      # ★★ 让我们的模板**优先于** jar 内的同名模板 ★★
+      #   file: 放在前面 ⇒ 命中我们目录里的 compress/svg/online3D.ftl；
+      #   其它模板（commonHeader 等）自动回落到 classpath:/web/。
+      #   ⚠️ 顺序不能反：反了 classpath 先命中，我们的覆盖就一点不生效。
+      SPRING_FREEMARKER_TEMPLATE_LOADER_PATH: "file:/opt/kk-templates/web/,classpath:/web/"
+
       JAVA_OPTS: "-XX:MaxRAMPercentage=45.0 -XX:+ExitOnOutOfMemoryError"
       # ★ 列真实 host，不要写 "*" ★ 4.1.0 的 TrustHostFilter 不支持 "*" 通配，
       #   写 "*" 会导致所有预览被判"不受信任"（notTrustHost 页 + sorry.jpg）。
-      KK_TRUST_HOST: "nebula,127.0.0.1,localhost"
+      #   nebula 必须在列：KK 要回拉应用签发的 raw 直链（http://nebula:8088/...）。
+      KK_TRUST_HOST: "nebula,kkfileview,127.0.0.1,localhost"
       KK_BASE_URL: "default"
       KK_CACHE_TYPE: "jdk"
       KK_OFFICE_PREVIEW_TYPE: "pdf"
@@ -188,10 +251,10 @@ services:
         hard: 65535
 
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8088/healthz || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8012/ || exit 1"]
       interval: 30s
       timeout: 5s
-      start_period: 90s
+      start_period: 120s
       retries: 5
 
     networks:
@@ -288,7 +351,16 @@ services:
       - nebula-net
 
 # -----------------------------------------------------------------------------
-# 统一内部网络：nebula / onlyoffice / cad-viewer 相互通过服务名访问
+# 命名卷
+#   nebula-nginx-cache：前门 nginx 的 proxy_cache 目录。**显式 name:**
+#   是为了复用既有卷（以前 nebula-front 容器用同一个卷），换编排不丢缓存。
+# -----------------------------------------------------------------------------
+volumes:
+  nebula-nginx-cache:
+    name: nebula-nginx-cache
+
+# -----------------------------------------------------------------------------
+# 统一内部网络：nebula / kkfileview / onlyoffice / cad-viewer 相互通过服务名访问
 # -----------------------------------------------------------------------------
 networks:
   nebula-net:

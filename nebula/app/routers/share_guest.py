@@ -9,11 +9,22 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import quote, urlencode, urlsplit
 
 from fastapi import APIRouter, Form, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
+from starlette.concurrency import run_in_threadpool
 from .. import files, integrations, shares, users, zipstream
 from ..config import route_of, settings
 from ..webutil import _origin, _internal_origin, _stream_file
 from ..share_web import _load_live_share, _share_unlocked, _set_share_cookie, _render_share_page
+# ★ 复用网盘的编码探测 / 转码实现，**不另抄一份** ★
+#   两处各写一遍，下次改转码参数（比如 yuv420p）就一定会漂移。
+#   fileops 不 import 本模块，所以这里不会形成循环导入。
+from . import fileops
 
 
 router = APIRouter()
@@ -134,6 +145,77 @@ async def api_share_raw(token: str, request: Request, path: str = "", download: 
         # 单文件分享：第一次取流算一次访问
         shares.bump_visit(token)
     return _stream_file(p, download=download)
+
+
+# ---------------------------------------------------------------------------
+# 分享页的视频「能播」流 —— 与网盘的 `GET /api/play` **同一套逻辑**
+#
+#   ★ 为什么要单独一个路由（而不是复用 /api/play）★
+#     访客**没有登录态**：/api/play 走 `auth.current_user`，
+#     而这里走分享 token + （若设了）提取码 Cookie。鉴权入口不同，只能各写一条。
+#
+#   ★ 为什么必须补上（2026-10-03）★
+#     分享页原本给 `<video>` 的地址直接是 `/api/s/<token>/raw`，于是
+#     **H.265/HEVC 的视频在分享页永远黑屏**（手机 WebView 不解 HEVC）——
+#     跟网盘那次是同一个病，只是入口不同。
+#     排查时只改了网盘那条腿，分享页漏了 ⇒ 同一个文件「网盘能播、分享页不能」。
+#     ⚠️ 这正是 `tools/check_preview_route_parity.py` 想防的那类**入口漂移**，
+#        只不过它守的是「路由判定」，守不到「取流入口」。
+#
+#   实现直接**调用 fileops 里的探测/转码函数**，不再抄一份 ——
+#   两处各写一遍，下次改转码参数就一定会漂移。
+#   （fileops 不 import share_guest，所以这里 import 它不会循环。）
+# ---------------------------------------------------------------------------
+@router.get("/api/s/{token}/play")
+async def api_share_play(token: str, request: Request, path: str = ""):
+    sh = _load_live_share(token)
+    if not _share_unlocked(request, token):
+        raise HTTPException(403, "需要提取码")
+
+    m = _mount_for_share(sh)
+    p, _sub, _full = _resolve_in_share(m, sh, path)
+
+    def _passthrough() -> RedirectResponse:
+        """回退：跳到原来的访客取流口（支持 Range、零转码成本、行为不变）。
+
+        注意这里**不** bump_visit —— 重定向后的 /raw 会按原逻辑计数，
+        在这里再数一次就成了双重计数。
+        """
+        q = urlencode({"path": path, "download": "false"})
+        return RedirectResponse(url=f"/api/s/{quote(token)}/raw?{q}", status_code=302)
+
+    try:
+        st = p.stat()
+        if not p.is_file():
+            raise OSError("not a file")
+    except OSError:
+        raise HTTPException(404, "文件不存在")
+
+    codec = await run_in_threadpool(fileops._detect_vcodec, p, st)
+    if codec != "hevc" or fileops._ffmpeg_exe() is None:
+        return _passthrough()
+
+    key = hashlib.sha1(
+        f"{p}|{st.st_mtime_ns}|{st.st_size}".encode("utf-8", "replace")
+    ).hexdigest()[:32]
+    try:
+        dst = fileops._cache_dir(fileops._TRANSCODE_CACHE_DIR) / f"{key}.mp4"
+    except OSError:
+        return _passthrough()
+
+    if not (dst.is_file() and dst.stat().st_size > 0):
+        try:
+            await run_in_threadpool(fileops._transcode_h264, p, dst)
+        except Exception:
+            return _passthrough()
+
+    if not sh.is_dir:
+        # 与 /raw 保持一致的计数语义（转码流不经过 /raw，所以在这里补上）
+        shares.bump_visit(token)
+    return FileResponse(
+        str(dst), media_type="video/mp4",
+        headers={"Cache-Control": "private, max-age=86400"},
+    )
 
 
 @router.get("/api/s/{token}/zip")
@@ -289,13 +371,22 @@ async def api_share_preview(token: str, request: Request, path: str = ""):
         public_raw = _browser_reachable_url(raw, request)
         q = urlencode({"open": public_raw, "name": p.name})
         inner = f"/cad/?{q}"
-        # ★ 与网盘一样，再包一层 /lite 外壳 ⇒「页面嵌入块」形态 ★
-        #   直接给 /cad/ 是**一整台 CAD 程序**（功能区/右侧工具条/命令行/状态栏），
-        #   分享页的读者多半在手机或微信里，那套 UI 既点不准又占地方。
-        #   —— 这正是思源插件嵌入块早就解决过的问题，复用同一个外壳页。
+        # ★★ 与网盘保持一致：**不再套 /lite 外壳**（2026-10-03）★★
+        #   原来这里给的是 integrations.lite_shell_url("cad", inner, p.name)，
+        #   即 iframe 套 iframe（分享页 → /lite → /cad/）。
+        #   但实测：飞牛 App 的 Android WebView **在两层 iframe 的内层里不执行脚本**
+        #   （HTML/CSS 照常渲染、<script> 一条不跑、子资源一个都不请求），
+        #   表现就是「CAD 一直转圈」。网盘那条已经改成直接给 /cad/，
+        #   并让 /cad/ 用 `embed=1` 自己注入「收 UI」的 CSS（见 cad.py 的长注释）。
+        #   ★ 两边必须同形，否则同一个图纸在网盘能开、在分享页打不开 ★
+        #   一致性由 tools/check_preview_route_parity.py 守着（含 /lite 检查）。
+        #
+        #   ★ 2026-10-04：与网盘同步，**默认给完整界面**（不再拼 embed=1）★
+        #     用户要求「CAD viewer 显示完整界面，包含菜单，工具条」。
+        #     需要收 UI 的调用方自己显式带 `embed=1`（机制保留在 cad.py 的
+        #     proxy_cad 里）。两边的形态必须一致，守门判据见上述工具。
         return {"ok": True, "route": "cad",
-                "url": integrations.lite_shell_url("cad", inner, p.name),
-                "inner": inner, "raw": public_raw}
+                "url": inner, "inner": inner, "embed": False, "raw": public_raw}
 
     # ② Office / PDF → OnlyOffice（访客一律只读）
     if route == "onlyoffice" and settings.oo_enabled:

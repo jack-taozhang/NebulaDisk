@@ -17,7 +17,8 @@
 #     而 .env 与数据（data/、onlyoffice/）留在部署目录里不动。
 #
 #   构建需要什么：
-#     · 基础镜像 kkfileview:5.0.2 —— 本脚本会在缺失时调用仓库根的 ./build.sh
+#     · 基础镜像 ubuntu:24.04（nebula）与 kkfileview:5.0.2（KK 独立服务）
+#       —— 缺失时本脚本会调用仓库根的 ./build.sh 构建 KK（官方源码，零定制）
 #       自动构建它（那一步会拉 maven 镜像 + 跑 Maven，首次约 10~20 分钟）
 #     · 能上外网（装 apt 包 / pip 依赖 / Maven 依赖）
 # =============================================================================
@@ -88,7 +89,8 @@ ensure_host_dirs "$DEPLOY_DIR/.env" "$DEPLOY_DIR"
 
 # ---------------------------------------------------------------------------
 say "4/7 准备基础镜像"
-BASE_IMG="$(env_get "$DEPLOY_DIR/.env" NB_BASE_IMAGE)"; BASE_IMG="${BASE_IMG:-kkfileview:5.0.2}"
+# ★ 2026-10-04：nebula 的底包从 kkfileview:5.0.2 换成 ubuntu:24.04（KK 已剥离）★
+BASE_IMG="$(env_get "$DEPLOY_DIR/.env" NB_BASE_IMAGE)"; BASE_IMG="${BASE_IMG:-ubuntu:24.04}"
 if $DK image inspect "$BASE_IMG" >/dev/null 2>&1; then
   ok "$BASE_IMG 已存在"
 elif [ "$DO_BUILD" = "1" ]; then
@@ -106,6 +108,25 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# ★ KK 独立镜像（2026-10-04 起）★
+#   KK 不再被 nebula 镜像包含，而是独立服务 kkfileview:<ver>。
+#   缺了它 → 所有非 Office 预览（zip/pdf/图片/视频/STEP…）全部不可用。
+#   镜像由仓库根的 ./build.sh 用**官方源码**构建（零定制；我们的模板走外置目录）。
+# ---------------------------------------------------------------------------
+KK_IMG="kkfileview:$(env_get "$DEPLOY_DIR/.env" NB_KK_VERSION)"
+[ "$KK_IMG" = "kkfileview:" ] && KK_IMG="kkfileview:5.0.2"
+if $DK image inspect "$KK_IMG" >/dev/null 2>&1; then
+  ok "KK 镜像已存在：$KK_IMG"
+elif [ "$DO_BUILD" = "1" ]; then
+  warn "$KK_IMG 不在本地 —— 调用仓库根的 ./build.sh 构建（官方源码，零定制）"
+  if ( cd "$ROOT" && bash ./build.sh ); then ok "KK 镜像构建完成：$KK_IMG"
+  else bad "KK 镜像构建失败。单独排错： cd $ROOT && ./build.sh"; fi
+else
+  warn "$KK_IMG 不在本地，而 --no-build 要求用它 —— 非 Office 预览会不可用"
+fi
+
 say "5/7 构建应用镜像"
 if [ "$DO_BUILD" = "1" ]; then
   if compose build; then ok "应用镜像构建完成"
@@ -127,7 +148,7 @@ wait_healthy 180 || true
 
 # ---------------------------------------------------------------------------
 say "7/7 验证"
-$DK ps --format '  {{.Names}}\t{{.Status}}' 2>/dev/null | grep -E 'nebula|onlyoffice|cad-viewer' || true
+$DK ps --format '  {{.Names}}\t{{.Status}}' 2>/dev/null | grep -E 'nebula|kkfileview|onlyoffice|cad-viewer' || true
 echo
 echo -n "  云盘 healthz： "
 $DK exec nebula curl -s --max-time 8 http://127.0.0.1:8088/healthz 2>/dev/null || echo "(取不到)"

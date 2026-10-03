@@ -1,7 +1,19 @@
 # NebulaDisk 部署指南
 
-仿 Windows 界面的云盘 + kkFileView 预览，统一编排为三个服务：
-**nebula**（云盘 + kkFileView，单镜像双进程）、**onlyoffice**、**cad-viewer**。
+仿 Windows 界面的云盘 + kkFileView 预览，统一编排为**四个**服务：
+**nebula**（云盘 + 前门 nginx，单镜像双进程）、**kkfileview**、**onlyoffice**、**cad-viewer**。
+
+> ★ 2026-10-04 架构变更（1.2.7）★
+> · **kkFileView 从 nebula 镜像里剥离**成独立服务：nebula 镜像从 2.78GB 降到约 0.7GB，
+>   改一行前端不再重建那 2GB 的 JRE/LibreOffice 层。
+> · **前门 nginx 并进 nebula 镜像**（以前是独立容器 nebula-front + 宿主目录绑定挂载）。
+>   理由是那份 conf 与应用的取值方式是一对（Host / X-Forwarded-Proto / Cookie 兜底），
+>   分开存放必然漂移 —— 实测事故：只传了 conf 没传它 include 的 `.inc`，
+>   `nginx -t` 照样通过、行为一点没变。
+> · 两者的连接方式：应用用 `NEBULA_PREVIEW=http://kkfileview:8012` 走**网络**访问 KK。
+> · KK 镜像保持**官方源码原样**（零定制）；我们那 3 个定制模板改走**外置模板目录**
+>   （`kk-templates/` → 容器内 `/opt/kk-templates/web/`，配
+>   `SPRING_FREEMARKER_TEMPLATE_LOADER_PATH` 让 `file:` 优先、classpath 兜底）。
 
 > 本文件是**唯一**部署文档（离线包里的 `安装说明.md` 就是它的拷贝）。
 > 以前有两份（源码版 / 离线包版）会各自漂移，现在合并成这一份。
@@ -38,15 +50,17 @@
 │   ├── diagnose-oo.sh               OnlyOffice 现场诊断
 │   ├── export-bundle.sh             生成 dist/ 离线包
 │   └── README.md                    本文件
-├── nebula/                        应用（Dockerfile / app / web / …）
-├── src/                           kkFileView 上游源码（构建基础镜像用）
-├── build.sh                       构建基础镜像 kkfileview:5.0.2
-└── Dockerfile
+├── nebula/                        应用（Dockerfile / app / web / nginx / …）
+│   └── kkfileview-templates/web/  ★ KK 的 3 个定制模板（挂进 KK 容器，镜像零改动）
+├── src/                           kkFileView 上游源码（**构建 KK 镜像**用）
+├── build.sh                       构建 kkfileview:<ver> 镜像（官方源码，零定制）
+└── Dockerfile                     ↑ 同上（KK 的构建文件）
 
 <部署目录>/                        例：/vol1/1000/NebulaDisk
 ├── .env                           ★ 配置（从 deploy/.env.example 复制）
 ├── data/                          云盘 SQLite + 会话密钥
 ├── data-kk/{file,log}/            kkFileView 转换产物
+├── kk-templates/                  ★ KK 外置模板（从离线包拷进来，只读挂给 KK）
 └── onlyoffice/ 或命名卷 oo-*       OnlyOffice 数据
 ```
 
@@ -99,7 +113,7 @@ NEBULA_MOUNTS=售前项目|/mnt/share|*;…
 1. **Docker + Compose**（NAS 上通常已装；Windows 用 Docker Desktop + WSL2）
 2. **能上外网**：要拉 `maven` 镜像、装 apt 包、拉 pip 依赖、跑 Maven
 3. **源码齐全**：必须有 `src/`（构建基础镜像用）。若只要重建应用层、且本地已有
-   `kkfileview:5.0.2`，那 `src/` 可以不完整
+   `kkfileview:5.0.2` 与 ubuntu:24.04，那 `src/` 可以不完整
 
 ### 2.2 一条命令
 
@@ -114,7 +128,8 @@ bash /vol1/1000/Docker/NebulaDisk/deploy/up.sh
 1/7 检查环境（探 docker 通道与 compose）
 2/7 准备 .env（不存在就从模板生成，并检查 NB_OO_SECRET 非空）
 3/7 准备宿主机目录（缺的自动建 —— 否则容器会静默摘掉那个映射，界面上"盘不见了"）
-4/7 准备基础镜像（缺 kkfileview:5.0.2 时自动调用仓库根的 ./build.sh）
+4/7 准备镜像：nebula 的底包是官方 ubuntu:24.04；**KK 是独立镜像 kkfileview:<ver>**，
+    缺失时自动调用仓库根的 ./build.sh（官方源码，零定制）构建它
 5/7 构建应用镜像（docker compose build）
 6/7 启动 + 等健康检查
 7/7 验证（容器状态 + healthz + OnlyOffice 链路预检）
@@ -135,7 +150,7 @@ bash deploy/up.sh --no-verify      # 跳过 OnlyOffice 链路预检
 ### 2.3 想手动分步
 
 ```bash
-cd <源码>/ && ./build.sh           # ① 基础镜像 kkfileview:5.0.2（必须在 WSL/Linux 里跑）
+cd <源码>/ && ./build.sh           # ① KK 镜像 kkfileview:5.0.2（需 src/，官方源码零定制）
 bash nebula/build.sh               # ② 应用镜像 nebula:1.2.6
 bash deploy/up.sh --no-build       # ③ 起栈
 ```
@@ -162,9 +177,11 @@ bash deploy/export-bundle.sh --save     # 生成 dist/nebula-<ver>/，并导出�
 产出：
 
 ```
-dist/nebula-1.2.6/
-├── nebula-1.2.6.tar (+.sha256)            云盘 + kkFileView 镜像
+dist/nebula-1.2.7/
+├── nebula-1.2.7.tar (+.sha256)            云盘 + 前门 nginx 镜像
+├── nebula-kkfileview-5.0.2.tar (+.sha256) kkFileView 镜像（独立）
 ├── nebula-cad-viewer-1.7.0.tar (+.sha256) CAD 查看器镜像
+├── kk-templates/                          KK 外置模板（部署时挂给 KK 容器）
 ├── docker-compose.yml                     纯运行版（无 build:）
 ├── .env.example  _common.sh  install.sh  diagnose-oo.sh
 └── 安装说明.md                             本文件的拷贝
@@ -194,7 +211,8 @@ bash install.sh
 >
 > **① 不变的默认值在 `nebula/Dockerfile` 的 ENV 里，不在 compose 里。**
 > compose 只写「**随部署变化**」的东西。像 `NEBULA_DATA_DIR`、`NEBULA_PORT`、
-> kkFileView 的 `KK_*` 开关这些产品固定值，都在 Dockerfile 里定义一次。
+> kkFileView 的 `KK_*` 开关这些产品固定值，现在定义在编排的 **kkfileview 服务**上
+> （2026-10-04 之前是写在 nebula 镜像的 ENV 里 —— KK 剥离后它属于 KK 那个容器）。
 > ⇒ 想查某个变量的默认值：**先去 Dockerfile 搜**。
 > ⇒ 想临时覆盖：在 `.env` 里写对应的 `NB_*`，或在 compose 的 `environment` 里
 > 直接写容器侧变量名（`environment` 优先于镜像 ENV）。
@@ -328,7 +346,7 @@ bash deploy/diagnose-oo.sh        # 离线包里是 bash diagnose-oo.sh
 | 类 | 现象 / 日志 | 根因 | 修复 |
 |---|---|---|---|
 | **B** | `EACCES: permission denied, mkdir '/tmp/ASC_CONVERT…'`（在 converter 日志里）<br>`docker exec onlyoffice ls -ldn /tmp` **不是** `drwxrwxrwt` | converter 以**非 root 用户 `ds`(uid 101)** 运行，必须在 `/tmp` 建临时目录。成因：① 镜像自带的 `/tmp` 权限就是错的（实测见过被重打过的镜像把 `/tmp` 做成 `0755`）；② 你的 Docker 给 tmpfs 的**默认 mode 是 0755**（不是标准的 1777） | 给 `/tmp` 挂 tmpfs 且**必须显式写 `mode=1777`**：`tmpfs:` / `  - /tmp:rw,exec,size=2G,mode=1777`。<br>⚠️ 只写 `- /tmp` 或只写 `size=` **都不行**，实测仍是 `drwxr-xr-x`。<br>同时**不要**设 `read_only: true`、**不要**设 `user:` |
-| **A** | 容器里 `getent hosts nebula` 无输出；请求 `NB_BASE_URL/healthz` 超时 | 两个容器**不在同一 docker 网络** | 本编排把三个服务都放在 `nebula-net` 上，正常不会遇到。若你替成了别的编排：让两者至少共享一张网络，或 `docker network connect <网络> nebula`（重建容器会掉） |
+| **A** | 容器里 `getent hosts nebula` 无输出；请求 `NB_BASE_URL/healthz` 超时 | 两个容器**不在同一 docker 网络** | 本编排把四个服务都放在 `nebula-net` 上，正常不会遇到。若你替成了别的编排：让两者至少共享一张网络，或 `docker network connect <网络> nebula`（重建容器会掉） |
 | **A** | 返回 **403 / 422** | 网络通了但**签名校验被拒** | 确认只有一台云盘实例；`NB_JWT_SECRET` 是否被改过 |
 | **A** | converter 日志出现 `It is private IP address` | OnlyOffice **默认拒绝从私有 IP 拉文档**，而 `NB_BASE_URL` 写成了 IP 字面量 | 改成**主机名**（`http://nebula:8088`，不受此限制）；或把 `default.json` 的 `services.CoAuthoring.requestFilteringAgent` 下 `allowPrivateIPAddress` / `allowMetaIPAddress` 改为 `true` 后重启 |
 | **A** | `NB_BASE_URL=http://<NAS_IP>:8089` | 容器间互通要用**容器端口 8088**，不是宿主机映射端口 | 改回 `http://nebula:8088` |
@@ -343,7 +361,8 @@ bash deploy/diagnose-oo.sh        # 离线包里是 bash diagnose-oo.sh
 
 ## 7. 常见问题
 
-**端口被占用** 改 `.env` 里的 `NB_HOST_PORT`（只影响宿主机侧，容器内固定 8088）
+**端口被占用** 改 `.env` 里的 `NB_HOST_PORT`（只影响宿主机侧；容器内固定 **80**——
+2026-10-04 起前端由并进镜像的 nginx 监听，应用退到 8088 仅本机可达）
 
 **重启后所有人要重新登录** `NB_DATA_DIR` 没真正挂到宿主机。检查
 `docker inspect nebula --format '{{json .Mounts}}'`；密钥文件是 `/var/lib/nebula/secret.key`
@@ -405,7 +424,7 @@ set to "nebula-net" (expected: "default")`** 你把 `networks:` 下面那个 **k
 | `deploy/diagnose-oo.sh` | OnlyOffice 打不开文档时的现场诊断（只读） |
 | `deploy/export-bundle.sh` | 生成 `dist/` 离线镜像包；`--save` 顺带导出 tar |
 | `deploy/.env.example` | 配置模板（变量含义逐条注释） |
-| `build.sh` | 构建基础镜像 `kkfileview:5.0.2`（需 `src/`） |
+| `build.sh` | 构建 **KK 独立镜像** `kkfileview:5.0.2`（官方源码，需 `src/`；零定制） |
 | `nebula/build.sh` | 只构建应用镜像 `nebula:1.2.6`（等价 `up.sh --no-*` 的构建部分） |
 | `nebula/selfcheck.py` | 后端自检：配置解析 / 路径穿越防护 / 路由齐全 |
 | `nebula/tools/run_unit_tests.sh` | 前端逻辑单元测试（8 套） |
@@ -427,3 +446,43 @@ set to "nebula-net" (expected: "default")`** 你把 `networks:` 下面那个 **k
 | 审计 | 登录、增删改、打开文档等写入 SQLite（保留最近 5000 条） |
 
 > `.env` 里有 `NB_OO_SECRET` 与 `NB_ADMIN_PASSWORD`，**别提交进版本库**（`.gitignore` 已含 `.env`）。
+
+---
+
+## 5. 运维：OnlyOffice 容器 /tmp 的自动清理（`oo-tmpclean.sh`）
+
+**背景**（2026-10-04 实事故）：OO 的 converter 把下载下来的源文档写进
+`/tmp/ASC_CONVERT*/source`，而容器 `/tmp` 是 compose 里挂的 **2GB tmpfs**
+（`tmpfs: - /tmp:rw,exec,size=2G,mode=1777`）。它被占满后**每次转换都失败**，
+编辑器弹「打开文件时发生错误」，日志里是
+`ENOSPC: no space left on device, write @ downloadFile` ——
+**而宿主 `df` 此时还有 7TB**，所以别去查磁盘，要查容器内的 `/tmp`：
+
+```bash
+docker exec onlyoffice df -h /tmp        # 看这一行，不是宿主的 df
+docker exec onlyoffice du -sh /tmp/* | sort -h | tail   # 谁占的
+```
+
+**安装**（脚本在本目录；NAS 上 cron 是 active 的）：
+
+```bash
+sudo cp oo-tmpclean.sh /vol1/1000/NebulaDisk/onlyoffice/oo-tmpclean.sh
+sudo chmod +x /vol1/1000/NebulaDisk/onlyoffice/oo-tmpclean.sh
+(crontab -l; echo '17 * * * * /vol1/1000/NebulaDisk/onlyoffice/oo-tmpclean.sh') | crontab -
+```
+
+卸载：`crontab -l | grep -v oo-tmpclean | crontab -`
+看日志：`tail -20 /vol1/1000/NebulaDisk/onlyoffice/tmpclean.log`
+
+**它怎么做的**：只删 `/tmp` **顶层**、名字匹配 `ASC_*` / `old-cache*` /
+`*-cache-*` / `onlyoffice-tmp*` 且**闲置超过 60 分钟**的条目；
+用量 >85% 时再来一轮放宽到 10 分钟；两轮后仍 >95% 只记 du top5（不删未知文件）。
+**用户在 /tmp 放的其它文件一律不碰。**
+
+**⚠️ 别用「重建容器 + 调大 tmpfs」来替代它**：OO 的
+`/etc/onlyoffice/documentserver/local.json` **不在任何挂载卷上**（见
+`docker-compose.yml` 里那条注释：bind mount 会让 entrypoint 的
+「写临时文件再 rename」报 `EBUSY`，配置注入失败）。重建容器会丢掉
+JWT 密钥、`allowPrivateIPAddress`、大文件上限 —— 宿主备份在
+`./onlyoffice/local.json`，需要手工重打。
+紧急恢复用 `docker restart onlyoffice`（tmpfs 会清零，约 30s，但会打断正在编辑的人）。

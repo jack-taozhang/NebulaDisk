@@ -72,11 +72,11 @@ const LinkManager = (() => {
      ------------------------------------------------------------------ */
   const accessCount = (s) => (s.kind === 'file' ? (s.hits || 0) : (s.visits || 0));
 
-  function copyText(text, label) {
-    return navigator.clipboard.writeText(text)
-      .then(() => Toast.ok('已复制', label || text))
-      .catch(() => Toast.info('请手动复制', text));
-  }
+  /* ★ 2026-10-04：本文件原来的本地 `copyText` 已删除 —— 它是这一批
+     「点了复制没反应 / 只能手动复制」报障的源头（只认 `navigator.clipboard`，
+     在 http:// 与 App WebView 里同步抛 TypeError，`.catch()` 接不到）。
+     现在统一用 shell.js 里的全局 `copyText`（三条路径依次降级，见那里的说明）。
+     ⚠️ 以后**不要**在这里再定义同名局部函数，否则会静默盖掉全局那个。 */
 
   function fullUrl(s) {
     return s.url
@@ -137,7 +137,7 @@ const LinkManager = (() => {
   function stateTip(s) {
     const bits = [validityTip(s)];
     if (s.kind === 'file') {
-      bits.push('直链：免登录、指向文件的当前内容');
+      bits.push('直链：免登录、点击即下载文件当前内容');
       bits.push('文件被删除 / 改名 / 移动时自动失效');
     } else {
       if (s.maxVisits) bits.push(`最多 ${s.maxVisits} 次访问（已用 ${s.visits || 0}）`);
