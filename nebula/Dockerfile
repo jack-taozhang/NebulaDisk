@@ -192,20 +192,24 @@ RUN set -eux; \
 #   容器起不来（那种情况下 `docker compose up` 只会看到容器反复重启）。
 #
 #   ⚠️ 但 nginx 在**解析配置时就会解析 upstream 里的主机名**，而构建期**没有
-#      docker 网络** ⇒ `onlyoffice` / `kkfileview` / `cad-viewer` 全部解析不到，
-#      `nginx -t` 会直接报：
+#      docker 网络** ⇒ `onlyoffice:80` 解析不到，`nginx -t` 会直接报：
 #          [emerg] host not found in upstream "onlyoffice:80"
 #      （已用最小 conf 实测确认：上游名不可解析时 `nginx -t` 必失败。）
-#   ⇒ 测试**前**往 /etc/hosts 塞临时条目、测完撤掉（只为过闸门，不留在镜像里；
-#      运行期 docker 会注入它自己的 /etc/hosts，覆盖同一文件）。
+#   ❌ 第一版想往 /etc/hosts 塞临时条目 —— **不行**：构建期 /etc/hosts 是
+#      runtime 的**只读挂载**，实测报 `cannot create /etc/hosts: Read-only file system`。
+#   ✅ 正解：临时把上游名 sed 成 127.0.0.1 再测，测完**恢复原文件**
+#      （镜像里的文件本身可写），并用 grep 复核恢复成功 —— 否则会把
+#      "改成 127.0.0.1" 的坏配置发出去（那会让 OO 完全不可用）。
 # -----------------------------------------------------------------------------
 RUN set -eux; \
-    cp /etc/hosts /tmp/hosts.bak; \
-    printf '127.0.0.1 onlyoffice\n127.0.0.1 kkfileview\n127.0.0.1 cad-viewer\n' >> /etc/hosts; \
+    cp /etc/nginx/conf.d/default.conf /tmp/dc.bak; \
+    sed -i 's#server onlyoffice:80#server 127.0.0.1:80#' /etc/nginx/conf.d/default.conf; \
     nginx -t; \
-    cp /tmp/hosts.bak /etc/hosts; \
-    rm -f /tmp/hosts.bak; \
-    echo "nginx 配置自检通过（upstream 主机名仅测试期临时可解析）"
+    cp /tmp/dc.bak /etc/nginx/conf.d/default.conf; \
+    rm -f /tmp/dc.bak; \
+    # 复核：默认上游必须**已还原**（上游名是容器名，不能留 127.0.0.1）
+    grep -q 'server onlyoffice:80' /etc/nginx/conf.d/default.conf; \
+    echo "nginx 配置自检通过（上游名仅测试期临时替换，已还原并复核）"
 
 # 启动脚本与事件监听器放到 PATH 上，supervisord 直接按名字调用
 RUN set -eux; \

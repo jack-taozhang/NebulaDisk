@@ -39,7 +39,7 @@ for a in "$@"; do
 done
 
 VER="$(env_get "$CDIR/.env.example" NB_VERSION)"; VER="${VER:-1.2.6}"
-CAD_VER="$(env_get "$CDIR/.env.example" NB_CAD_VERSION)"; CAD_VER="${CAD_VER:-1.7.0}"
+CAD_VER="$(env_get "$CDIR/.env.example" NB_CAD_VERSION)"; CAD_VER="${CAD_VER:-1.7.4}"
 OUT="$ROOT/dist/nebula-$VER"
 
 # ---------------------------------------------------------------------------
@@ -124,9 +124,17 @@ cp -f "$CDIR/gen-mounts.py"          "$OUT/gen-mounts.py"        && ok "gen-moun
 #   KK 镜像保持官方源码原样，我们的定制走这个目录（compose 挂到 /opt/kk-templates）。
 #   漏进离线包的表现：zip / svg / STEP 预览变回 KK 默认页面（甚至 3D 直接打不开）。
 if [ -d "$CDIR/../nebula/kkfileview-templates/web" ]; then
-  mkdir -p "$OUT/kk-templates"
-  cp -f "$CDIR/../nebula/kkfileview-templates/web/"*.ftl "$OUT/kk-templates/" \
-    && ok "kk-templates/（KK 外置模板：$(ls "$OUT/kk-templates" | wc -l) 个）"
+  # ★★ 必须保留 `web/` 这一层，不能扁平化 ★★
+  #   compose 按 `./kk-templates:/opt/kk-templates` 挂载，而加载路径是
+  #   `file:/opt/kk-templates/web/,classpath:/web/`
+  #   ⇒ 模板只有在 `<挂载点>/web/*.ftl` 才会被命中。
+  #   扁平化不会报任何错，只会让 KK 静默回落到 jar 里的官方模板。
+  #   ⚠️ 先清空目标（脚本不清理输出目录）：否则上一轮的陈旧文件会和新文件并存，
+  #      打包出来的离线包里会同时有 kk-templates/*.ftl 与 kk-templates/web/*.ftl。
+  rm -rf "$OUT/kk-templates"
+  mkdir -p "$OUT/kk-templates/web"
+  cp -f "$CDIR/../nebula/kkfileview-templates/web/"*.ftl "$OUT/kk-templates/web/" \
+    && ok "kk-templates/web/（KK 外置模板：$(ls "$OUT/kk-templates/web" | wc -l) 个）"
 else
   bad "缺 nebula/kkfileview-templates/web —— zip/svg/3D 预览会退回 KK 默认页"; exit 1
 fi
@@ -207,7 +215,7 @@ if [ "$DO_SAVE" = "1" ]; then
   save_one "nebula:$VER" "$OUT_FOR_DOCKER/nebula-$VER.tar"
   # ★ KK 独立镜像（2026-10-04）★ 它不再被 nebula 镜像包含，必须单独给
   KK_VER="$(env_get "$CDIR/.env.example" NB_KK_VERSION)"; KK_VER="${KK_VER:-5.0.2}"
-  save_one "kkfileview:$KK_VER" "$OUT_FOR_DOCKER/nebula-kkfileview-$KK_VER.tar"
+  save_one "kkfileview:$KK_VER" "$OUT_FOR_DOCKER/kkfileview-$KK_VER.tar"
   save_one "nebula/cad-viewer:$CAD_VER" "$OUT_FOR_DOCKER/nebula-cad-viewer-$CAD_VER.tar"
 fi
 

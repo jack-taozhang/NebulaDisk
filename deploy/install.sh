@@ -4,7 +4,7 @@
 #
 #   ★ 本脚本给「离线包」用 ★
 #     离线包 = 本目录下同时有：
-#         nebula-<ver>.tar / nebula-kkfileview-<ver>.tar / nebula-cad-viewer-<ver>.tar
+#         nebula-<ver>.tar / kkfileview-<ver>.tar / nebula-cad-viewer-<ver>.tar
 #                                                          （docker save 产物）
 #         docker-compose.yml                               （纯运行版，生成物）
 #         .env.example / _common.sh / install.sh / diagnose-oo.sh
@@ -73,10 +73,10 @@ else
 fi
 
 if [ -n "$CAD_TAR" ]; then
-  # CAD 包里有 1.7.0 与 latest 两个 tag，导完确认一下
+  # CAD 包里有 1.7.4 与 latest 两个 tag，导完确认一下
   $DK load -i "$CAD_TAR" >/dev/null 2>&1 || warn "CAD 镜像导入失败"
   if $DK image inspect nebula/cad-viewer:latest >/dev/null 2>&1 \
-     || $DK image inspect "nebula/cad-viewer:1.7.0" >/dev/null 2>&1; then
+     || $DK image inspect "nebula/cad-viewer:1.7.4" >/dev/null 2>&1; then
     ok "nebula/cad-viewer 已就绪"
   else
     warn "导入后仍找不到 nebula/cad-viewer —— dwg/dxf 预览会不可用"
@@ -88,14 +88,14 @@ fi
 
 # ---- KK 独立镜像（2026-10-04 起）----
 #   KK 不再包含在 nebula 镜像里；少导入它 = 所有非 Office 预览不可用。
-KK_TAR="$(ls "$CDIR"/nebula-kkfileview-*.tar 2>/dev/null | head -1)"
+KK_TAR="$(ls "$CDIR"/kkfileview-*.tar 2>/dev/null | head -1)"
 if [ -n "$KK_TAR" ]; then
   say "导入 kkFileView 镜像"
   # 版本号同样从 tar 文件名取（与 compose 里 image: 的 tag 对齐）
-  KK_VER="$(basename "$KK_TAR" | sed -E 's#^nebula-kkfileview-([0-9][0-9.]*)\.tar$#\1#')"
+  KK_VER="$(basename "$KK_TAR" | sed -E 's#^kkfileview-([0-9][0-9.]*)\.tar$#\1#')"
   if load_image_tar "$KK_TAR" "kkfileview:${KK_VER}"; then ok "kkFileView 镜像已导入"; else warn "kkFileView 镜像导入失败"; fi
 else
-  warn "没找到 nebula-kkfileview-*.tar —— 跳过（zip/pdf/图片/视频等预览将不可用）"
+  warn "没找到 kkfileview-*.tar —— 跳过（zip/pdf/图片/视频等预览将不可用）"
 fi
 
 # ---------------------------------------------------------------------------

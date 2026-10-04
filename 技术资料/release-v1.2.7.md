@@ -67,8 +67,8 @@ kk-templates/web/*.ftl  →(挂载)→  /opt/kk-templates/web/SPRING_FREEMARKER_
 ```bash
 # 1) 导入三个镜像（离线包里的 tar）
 docker load -i nebula-1.2.7.tar
-docker load -i nebula-kkfileview-5.0.2.tar
-docker load -i nebula-cad-viewer-1.7.0.tar
+docker load -i kkfileview-5.0.2.tar
+docker load -i nebula-cad-viewer-1.7.4.tar
 
 # 2) 部署目录：用新版编排 + 拷贝外置模板
 cp dist/nebula-1.2.7/docker-compose.yml       <部署目录>/
@@ -96,8 +96,8 @@ docker stop nebula-front && docker rm nebula-front
 ```
 dist/nebula-1.2.7/
 ├── nebula-1.2.7.tar (+.sha256)            云盘 + 前门 nginx 镜像
-├── nebula-kkfileview-5.0.2.tar (+.sha256) kkFileView 镜像（官方源码构建，零定制）
-├── nebula-cad-viewer-1.7.0.tar (+.sha256) CAD 查看器镜像
+├── kkfileview-5.0.2.tar (+.sha256) kkFileView 镜像（官方源码构建，零定制）
+├── nebula-cad-viewer-1.7.4.tar (+.sha256) CAD 查看器镜像
 ├── kk-templates/                          ★ KK 外置模板（挂进 KK 容器）
 ├── docker-compose.yml                     单文件自洽（含默认共享盘挂载）
 ├── docker-compose.base.yml                纯运行版（不含共享盘）

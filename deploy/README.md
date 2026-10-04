@@ -12,7 +12,7 @@
 >   `nginx -t` 照样通过、行为一点没变。
 > · 两者的连接方式：应用用 `NEBULA_PREVIEW=http://kkfileview:8012` 走**网络**访问 KK。
 > · KK 镜像保持**官方源码原样**（零定制）；我们那 3 个定制模板改走**外置模板目录**
->   （`kk-templates/` → 容器内 `/opt/kk-templates/web/`，配
+>   （`kk-templates/web/` → 容器内 `/opt/kk-templates/web/`，配
 >   `SPRING_FREEMARKER_TEMPLATE_LOADER_PATH` 让 `file:` 优先、classpath 兜底）。
 
 > 本文件是**唯一**部署文档（离线包里的 `安装说明.md` 就是它的拷贝）。
@@ -60,7 +60,8 @@
 ├── .env                           ★ 配置（从 deploy/.env.example 复制）
 ├── data/                          云盘 SQLite + 会话密钥
 ├── data-kk/{file,log}/            kkFileView 转换产物
-├── kk-templates/                  ★ KK 外置模板（从离线包拷进来，只读挂给 KK）
+├── kk-templates/web/              ★ KK 外置模板（从离线包拷进来，只读挂给 KK）
+│                                   ⚠️ 必须保留 web/ 这层，加载路径就是 /opt/kk-templates/web/
 └── onlyoffice/ 或命名卷 oo-*       OnlyOffice 数据
 ```
 
@@ -179,9 +180,9 @@ bash deploy/export-bundle.sh --save     # 生成 dist/nebula-<ver>/，并导出�
 ```
 dist/nebula-1.2.7/
 ├── nebula-1.2.7.tar (+.sha256)            云盘 + 前门 nginx 镜像
-├── nebula-kkfileview-5.0.2.tar (+.sha256) kkFileView 镜像（独立）
-├── nebula-cad-viewer-1.7.0.tar (+.sha256) CAD 查看器镜像
-├── kk-templates/                          KK 外置模板（部署时挂给 KK 容器）
+├── kkfileview-5.0.2.tar (+.sha256) kkFileView 镜像（独立）
+├── nebula-cad-viewer-1.7.4.tar (+.sha256) CAD 查看器镜像
+├── kk-templates/web/                      KK 外置模板（部署时挂给 KK 容器）
 ├── docker-compose.yml                     纯运行版（无 build:）
 ├── .env.example  _common.sh  install.sh  diagnose-oo.sh
 └── 安装说明.md                             本文件的拷贝

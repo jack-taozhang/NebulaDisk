@@ -268,7 +268,7 @@ services:
   #   浏览器必然白屏。无状态：不挂任何卷，文件读写都在 nebula 容器里。
   # ===========================================================================
   cad-viewer:
-    image: nebula/cad-viewer:${NB_CAD_VERSION:-1.7.0}
+    image: nebula/cad-viewer:${NB_CAD_VERSION:-1.7.4}
     pull_policy: never          # 只用本地已导入的镜像
     profiles: ["bundled"]
     <<: *common

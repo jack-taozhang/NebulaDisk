@@ -330,7 +330,7 @@ services:
   # CAD 图纸查看器（nebula/cad-viewer）
   # ---------------------------------------------------------------------------
   cad-viewer:
-    image: nebula/cad-viewer:1.7.0
+    image: nebula/cad-viewer:1.7.4
     pull_policy: never          # 离线环境：只使用本地已导入镜像
     container_name: cad-viewer
     restart: unless-stopped
